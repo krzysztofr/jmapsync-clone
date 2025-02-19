@@ -19,32 +19,13 @@ func main() {
 	var cfg syncConfig
 	flag.StringVar(&cfg.dbPath, "db", filepath.Join(os.Getenv("HOME"), ".jmapsync.db"), "SQLite database for storing last sync state")
 	flag.StringVar(&cfg.maildir, "maildir", "", "Destination maildir directory (created if it doesn't exist)")
-	minTime := flag.String("min-time", "", "Minimum received-at RFC 3339 time (empty to get all since last sync)")
-	maxTime := flag.String("max-time", "", "Maximum received-at RFC 3339 time (empty to not set limit)")
+	flag.BoolVar(&cfg.list, "list", false, "List all matching messages instead of syncing them")
+	flag.Var((*timeValue)(&cfg.minTime), "min-time", "Minimum received-at RFC 3339 time (empty to get all since last sync)")
+	flag.Var((*timeValue)(&cfg.maxTime), "max-time", "Maximum received-at RFC 3339 time (empty to not set limit)")
 	sessionURL := flag.String("session-url", "https://api.fastmail.com/jmap/session", "JMAP Session resource URL")
 	flag.Parse()
 
 	rv := func() int {
-		// Validate flags.
-		if cfg.maildir == "" {
-			fmt.Fprintln(os.Stderr, "Destination maildir must be specified via -maildir")
-			return 2
-		}
-		if *minTime != "" {
-			var err error
-			if cfg.minTime, err = time.Parse(time.RFC3339, *minTime); err != nil {
-				fmt.Fprintf(os.Stderr, "Invalid -min-time %q: %v\n", *minTime, err)
-				return 2
-			}
-		}
-		if *maxTime != "" {
-			var err error
-			if cfg.maxTime, err = time.Parse(time.RFC3339, *maxTime); err != nil {
-				fmt.Fprintf(os.Stderr, "Invalid -max-time %q: %v\n", *maxTime, err)
-				return 2
-			}
-		}
-
 		// Read the auth token from .netrc.
 		u, err := url.Parse(*sessionURL)
 		if err != nil {
@@ -78,4 +59,25 @@ func main() {
 		return 0
 	}()
 	os.Exit(rv)
+}
+
+// timeValue implements the flag.Value interface for parsing an RFC 3339 datetime into a time.Time.
+type timeValue time.Time
+
+func (v *timeValue) String() string {
+	if time.Time(*v).IsZero() {
+		return ""
+	}
+	return time.Time(*v).Format(time.RFC3339)
+}
+
+func (v *timeValue) Set(s string) error {
+	if s == "" {
+		*v = timeValue(time.Time{})
+		return nil
+	}
+	var err error
+	tm, err := time.Parse(time.RFC3339, s)
+	*v = timeValue(tm)
+	return err
 }
