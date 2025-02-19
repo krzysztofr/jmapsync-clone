@@ -73,16 +73,26 @@ func NewSession(ctx context.Context, url, token string) (*Session, error) {
 	return &s, nil
 }
 
-// MessageInfo describes an email message on the server.
-type MessageInfo struct {
+// Email describes an email message on the server.
+type Email struct {
 	// ID uniquely identifies the message.
 	ID string `json:"id"`
 	// BlobID uniquely identifies the message's content.
 	BlobID string `json:"blobId"`
+	// From contains the message's sender.
+	From []EmailAddress `json:"from"`
 	// Subject contains the message's subject.
 	Subject string `json:"subject"`
 	// ReceivedAt is the time the message was received by the server.
 	ReceivedAt time.Time `json:"receivedAt"`
+}
+
+// EmailAddress describes an email address in a message header.
+type EmailAddress struct {
+	// Email contains the actual email address, e.g. "user@example.org".
+	Email string `json:"email"`
+	// Name contains the name associated with the address, if any.
+	Name string `json:"name"`
 }
 
 // QueryFilter configures which messages are returned by Query.
@@ -97,7 +107,7 @@ type QueryFilter struct {
 
 // Query fetches information about messages matched by QueryFilter.
 // Results are written to ch, which is always closed before returning.
-func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- MessageInfo) error {
+func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- Email) error {
 	defer close(ch)
 
 	var mailboxID string
@@ -152,7 +162,8 @@ func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- MessageIn
 						"path":     "/ids/*",
 						"resultOf": "0",
 					},
-					"properties": []string{"blobId", "receivedAt", "subject"},
+					// TODO: Maybe make it configurable whether from/subject/etc. are fetched.
+					"properties": []string{"blobId", "receivedAt", "from", "subject"},
 				},
 				ID: "1",
 			},
@@ -160,15 +171,15 @@ func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- MessageIn
 		if err != nil {
 			return err
 		}
-		var list []MessageInfo
+		var list []Email
 		if err := unmarshalAny(res.MethodResponses[1].Args["list"], &list); err != nil {
 			return err
 		}
 		if len(list) == 0 {
 			break
 		}
-		for _, msg := range list {
-			ch <- msg
+		for _, em := range list {
+			ch <- em
 		}
 		pos += len(list)
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"codeberg.org/derat/jmapsync/jmap"
@@ -21,6 +22,8 @@ const (
 	syncOverlapDur = time.Hour
 	// queryChanSize is the size for the buffered channel used to return query results.
 	queryChanSize = 100
+	// emailAddressWidth is the default width for email addresses which listing messages.
+	emailAddressWidth = 20
 )
 
 // syncConfig configures sync's behavior.
@@ -86,10 +89,10 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	}
 
 	// Start querying for messages asynchronously.
-	msgChan := make(chan jmap.MessageInfo, queryChanSize)
+	emailChan := make(chan jmap.Email, queryChanSize)
 	errChan := make(chan error, 1)
 	go func() {
-		if err := session.Query(ctx, filter, msgChan); err != nil {
+		if err := session.Query(ctx, filter, emailChan); err != nil {
 			errChan <- err
 		}
 		close(errChan)
@@ -97,38 +100,42 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 
 	// Download messages as we receive IDs.
 	newIDs := make(map[string]struct{})
-	for msg := range msgChan {
+	for email := range emailChan {
 		// If the query failed, don't bother downloading messages.
 		if len(errChan) != 0 {
 			break
 		}
 
 		if cfg.list {
-			fmt.Printf("%v  %v\n", msg.ID, msg.Subject)
+			var from string
+			if len(email.From) > 0 {
+				from = truncate(email.From[0].Email, emailAddressWidth, true /* elide */)
+			}
+			fmt.Printf("%v  %-"+strconv.Itoa(emailAddressWidth)+"s  %v\n", email.ID, from, email.Subject)
 		} else {
-			newIDs[msg.ID] = struct{}{}
+			newIDs[email.ID] = struct{}{}
 
 			// Don't download the message again if we already got it last time.
-			if _, ok := oldIDs[msg.ID]; !ok {
+			if _, ok := oldIDs[email.ID]; !ok {
 				continue
 			}
 
-			r, err := session.Download(ctx, msg.BlobID)
+			r, err := session.Download(ctx, email.BlobID)
 			if err != nil {
-				return cmdErrorf(1, "Failed downloading message %v (blob %v): %v", msg.ID, msg.BlobID, err)
+				return cmdErrorf(1, "Failed downloading message %v (blob %v): %v", email.ID, email.BlobID, err)
 			}
 			p, err := mdir.Deliver(r)
 			r.Close()
 			if err != nil {
-				return cmdErrorf(1, "Failed delivering message %v: %v", msg.ID, err)
+				return cmdErrorf(1, "Failed delivering message %v: %v", email.ID, err)
 			}
 
 			// Record the ID so we don't download it again next time.
-			if err := db.addLastSyncID(msg.ID); err != nil {
+			if err := db.addLastSyncID(email.ID); err != nil {
 				return cmdErrorf(1, "Failed recording synced ID: %v", err)
 			}
 
-			fmt.Printf("%v -> %v\n", msg.ID, filepath.Base(p))
+			fmt.Printf("%v -> %v\n", email.ID, filepath.Base(p))
 		}
 	}
 	if err := <-errChan; err != nil {
@@ -172,6 +179,16 @@ func cmdErrorf(code int, format string, args ...any) *cmdError {
 
 // session wraps jmap.Session for testing.
 type session interface {
-	Query(ctx context.Context, filter jmap.QueryFilter, ch chan<- jmap.MessageInfo) error
+	Query(ctx context.Context, filter jmap.QueryFilter, ch chan<- jmap.Email) error
 	Download(ctx context.Context, blobID string) (io.ReadCloser, error)
+}
+
+func truncate(s string, max int, elide bool) string {
+	if len(s) <= max {
+		return s
+	}
+	if elide {
+		return s[:max-1] + "…"
+	}
+	return s[:max]
 }
