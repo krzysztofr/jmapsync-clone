@@ -4,13 +4,14 @@
 package main
 
 import (
+	"bytes"
 	"errors"
-	"fmt"
 	"os"
 	"regexp"
 )
 
 // readNetrcMachine returns the .netrc entry for the specified machine name.
+// nil is returned if the machine is not found.
 //
 //	https://linux.die.net/man/5/netrc
 //	https://www.gnu.org/software/inetutils/manual/html_node/The-_002enetrc-file.html
@@ -20,28 +21,24 @@ func readNetrcMachine(p string, machine string) (*netrcMachine, error) {
 		return nil, err
 	}
 
-	tokens := netrcSpaceRegexp.Split(string(b), -1)
+	tokens := netrcSpaceRegexp.Split(string(bytes.TrimSpace(b)), -1)
 
-	var i int
-	var readErr error
-	readToken := func() string {
-		if readErr != nil {
-			return ""
+	var tokenIdx int
+	readToken := func() (string, bool) {
+		if tokenIdx >= len(tokens) {
+			return "", false
 		}
-		if i >= len(tokens) {
-			readErr = errors.New("ran out of tokens")
-			return ""
-		}
-		defer func() { i++ }()
-		return tokens[i]
+		token := tokens[tokenIdx]
+		tokenIdx++
+		return token, true
 	}
 
 	var cur *netrcMachine
 
 	for {
-		token := readToken()
-		if readErr != nil {
-			return nil, readErr
+		token, ok := readToken()
+		if !ok {
+			break
 		}
 
 		if token == "macdef" {
@@ -60,26 +57,26 @@ func readNetrcMachine(p string, machine string) (*netrcMachine, error) {
 		}
 		switch token {
 		case "machine":
-			cur.machine = readToken()
+			cur.machine, ok = readToken()
 		case "default":
 			// Don't consume another token.
 		case "login":
-			cur.login = readToken()
+			cur.login, ok = readToken()
 		case "password":
-			cur.password = readToken()
+			cur.password, ok = readToken()
 		case "account":
-			cur.account = readToken()
+			cur.account, ok = readToken()
 		default:
 			return nil, errors.New("invalid token")
 		}
-		if readErr != nil {
-			return nil, readErr
+		if !ok {
+			return nil, errors.New("ran out of tokens")
 		}
 	}
 	if cur != nil && cur.machine == machine {
 		return cur, nil
 	}
-	return nil, fmt.Errorf("machine %q not found", machine)
+	return nil, nil
 }
 
 type netrcMachine struct {
