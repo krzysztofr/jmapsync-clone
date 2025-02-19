@@ -20,15 +20,17 @@ const (
 	// requesting messages. I'm doing this speculatively to reduce the chances of missed
 	// messages if the server doesn't make delivered messages immediately available via JMAP.
 	syncOverlapDur = time.Hour
+	// queryChanSize is the size for the buffered channel used to return query results.
+	queryChanSize = 100
 )
 
 // syncConfig configures sync's behavior.
 type syncConfig struct {
-	dbPath    string
-	maildir   string
-	minTime   time.Time
-	maxTime   time.Time
-	startTime time.Time
+	dbPath    string    // path to stateDB SQLite file
+	maildir   string    // path to destination maildir
+	minTime   time.Time // min receivedAt time
+	maxTime   time.Time // max receivedAt type
+	startTime time.Time // time when sync started
 }
 
 // sync uses session to sync messages per cfg.
@@ -70,13 +72,24 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 		return cmdErrorf(1, "Failed initializing %v: %v", cfg.maildir, err)
 	}
 
-	msgs, err := session.Query(ctx, after, before)
-	if err != nil {
-		return cmdErrorf(1, "Failed querying for messages: %v", err)
-	}
+	// Start querying for messages asynchronously.
+	msgChan := make(chan jmap.MessageInfo, queryChanSize)
+	errChan := make(chan error, 1)
+	go func() {
+		if err := session.Query(ctx, after, before, msgChan); err != nil {
+			errChan <- err
+		}
+		close(errChan)
+	}()
 
-	newIDs := make(map[string]struct{}, len(msgs))
-	for _, msg := range msgs {
+	// Download messages as we receive IDs.
+	newIDs := make(map[string]struct{})
+	for msg := range msgChan {
+		// If the query failed, don't bother downloading messages.
+		if len(errChan) != 0 {
+			break
+		}
+
 		newIDs[msg.ID] = struct{}{}
 
 		// Don't download the message again if we already got it last time.
@@ -100,6 +113,9 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 		}
 
 		log.Printf("%v -> %v", msg.ID, filepath.Base(p))
+	}
+	if err := <-errChan; err != nil {
+		return cmdErrorf(1, "Failed querying for messages: %v", err)
 	}
 
 	if err := db.setLastSyncStart(cfg.startTime); err != nil {
@@ -137,6 +153,6 @@ func cmdErrorf(code int, format string, args ...any) *cmdError {
 
 // session wraps jmap.Session for testing.
 type session interface {
-	Query(ctx context.Context, after, before time.Time) ([]jmap.MessageInfo, error)
+	Query(ctx context.Context, after, before time.Time, ch chan<- jmap.MessageInfo) error
 	Download(ctx context.Context, blobID string) (io.ReadCloser, error)
 }

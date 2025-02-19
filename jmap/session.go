@@ -77,10 +77,12 @@ type MessageInfo struct {
 }
 
 // Query fetches information about messages with "receivedAt" dates between after and before
-// (either of which may be the zero value).
-func (s *Session) Query(ctx context.Context, after, before time.Time) ([]MessageInfo, error) {
+// (either of which may be the zero value). Results are written to ch, which is always closed
+// before returning.
+func (s *Session) Query(ctx context.Context, after, before time.Time, ch chan<- MessageInfo) error {
+	defer close(ch)
+
 	var pos int
-	var messages []MessageInfo
 	for {
 		log.Printf("Querying at position %v", pos)
 
@@ -133,34 +135,36 @@ func (s *Session) Query(ctx context.Context, after, before time.Time) ([]Message
 
 		b, err := json.Marshal(&jreq)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		res, err := s.call(ctx, http.MethodPost, s.data.APIURL, bytes.NewReader(b))
 		if err != nil {
-			return nil, err
+			return err
 		}
 		defer res.Body.Close()
 
 		var jres response
 		if err := json.NewDecoder(res.Body).Decode(&jres); err != nil {
-			return nil, err
+			return err
 		} else if n := len(jres.MethodResponses); n != 2 {
-			return nil, fmt.Errorf("got %v method response(s); expected 2", n)
+			return fmt.Errorf("got %v method response(s); expected 2", n)
 		} else if id1, id2 := jres.MethodResponses[1].ID, jreq.MethodCalls[1].ID; id1 != id2 {
-			return nil, fmt.Errorf("second method response was for %q; expected %q", id1, id2)
+			return fmt.Errorf("second method response was for %q; expected %q", id1, id2)
 		}
 		var list []MessageInfo
 		if err := unmarshalAny(jres.MethodResponses[1].Args["list"], &list); err != nil {
-			return nil, err
+			return err
 		}
 		if len(list) == 0 {
 			break
 		}
-		messages = append(messages, list...)
+		for _, msg := range list {
+			ch <- msg
+		}
 		pos += len(list)
 	}
 
-	return messages, nil
+	return nil
 }
 
 // unmarshalAny is a dumb helper function that marshals src to JSON and then unmarshals the
