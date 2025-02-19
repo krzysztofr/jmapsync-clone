@@ -25,17 +25,22 @@ const (
 
 // syncConfig configures sync's behavior.
 type syncConfig struct {
-	dbPath    string    // path to stateDB SQLite file
-	maildir   string    // path to destination maildir
-	minTime   time.Time // min receivedAt time
-	maxTime   time.Time // max receivedAt type
-	startTime time.Time // time when sync started
-	list      bool      // list messages instead of downloading them
+	dbPath      string    // path to stateDB SQLite file
+	maildir     string    // path to destination maildir
+	minTime     time.Time // min receivedAt time
+	maxTime     time.Time // max receivedAt type
+	mailboxName string    // mailbox to sync; empty for all
+	startTime   time.Time // time when sync started
+	list        bool      // list messages instead of downloading them
 }
 
 // sync uses session to sync messages per cfg.
 func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
-	after, before := cfg.minTime, cfg.maxTime
+	filter := jmap.QueryFilter{
+		After:       cfg.minTime,
+		Before:      cfg.maxTime,
+		MailboxName: cfg.mailboxName,
+	}
 	oldIDs := make(map[string]struct{})
 	var mdir *maildir.Maildir
 	var db *stateDB
@@ -57,12 +62,12 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 
 		// Sync messages received since slightly before the last sync if the user didn't specify a
 		// minimum time.
-		if after.IsZero() {
-			if after, err = db.getLastSyncStart(); err != nil {
+		if filter.After.IsZero() {
+			if filter.After, err = db.getLastSyncStart(); err != nil {
 				return cmdErrorf(1, "Failed getting last sync time: %v", err)
 			}
-			if !after.IsZero() {
-				after = after.Add(-syncOverlapDur)
+			if !filter.After.IsZero() {
+				filter.After = filter.After.Add(-syncOverlapDur)
 			}
 		}
 
@@ -84,7 +89,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	msgChan := make(chan jmap.MessageInfo, queryChanSize)
 	errChan := make(chan error, 1)
 	go func() {
-		if err := session.Query(ctx, after, before, msgChan); err != nil {
+		if err := session.Query(ctx, filter, msgChan); err != nil {
 			errChan <- err
 		}
 		close(errChan)
@@ -167,6 +172,6 @@ func cmdErrorf(code int, format string, args ...any) *cmdError {
 
 // session wraps jmap.Session for testing.
 type session interface {
-	Query(ctx context.Context, after, before time.Time, ch chan<- jmap.MessageInfo) error
+	Query(ctx context.Context, filter jmap.QueryFilter, ch chan<- jmap.MessageInfo) error
 	Download(ctx context.Context, blobID string) (io.ReadCloser, error)
 }

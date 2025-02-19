@@ -23,6 +23,11 @@ const (
 	maxQueryBatchSize = 500
 )
 
+var reqUsing = []string{
+	"urn:ietf:params:jmap:core",
+	"urn:ietf:params:jmap:mail",
+}
+
 // Session is a JMAP Mail session.
 type Session struct {
 	// accountID is the account ID returned by the JMAP Session resource URL.
@@ -70,17 +75,38 @@ func NewSession(ctx context.Context, url, token string) (*Session, error) {
 
 // MessageInfo describes an email message on the server.
 type MessageInfo struct {
-	ID         string    `json:"id"`
-	BlobID     string    `json:"blobId"`
-	Subject    string    `json:"subject"`
+	// ID uniquely identifies the message.
+	ID string `json:"id"`
+	// BlobID uniquely identifies the message's content.
+	BlobID string `json:"blobId"`
+	// Subject contains the message's subject.
+	Subject string `json:"subject"`
+	// ReceivedAt is the time the message was received by the server.
 	ReceivedAt time.Time `json:"receivedAt"`
 }
 
-// Query fetches information about messages with "receivedAt" dates between after and before
-// (either of which may be the zero value). Results are written to ch, which is always closed
-// before returning.
-func (s *Session) Query(ctx context.Context, after, before time.Time, ch chan<- MessageInfo) error {
+// QueryFilter configures which messages are returned by Query.
+type QueryFilter struct {
+	// After is a lower bound for messages' "receivedAt" dates.
+	After time.Time
+	// Before is an upper bound for messages' "receivedAt" dates.
+	Before time.Time
+	// MailboxName is the name of a mailbox that messages must be in, e.g. "Inbox" or "Sent".
+	MailboxName string
+}
+
+// Query fetches information about messages matched by QueryFilter.
+// Results are written to ch, which is always closed before returning.
+func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- MessageInfo) error {
 	defer close(ch)
+
+	var mailboxID string
+	if qf.MailboxName != "" {
+		var err error
+		if mailboxID, err = s.getMailboxID(ctx, qf.MailboxName); err != nil {
+			return fmt.Errorf("get mailbox ID: %w", err)
+		}
+	}
 
 	var pos int
 	for {
@@ -95,64 +121,47 @@ func (s *Session) Query(ctx context.Context, after, before time.Time, ch chan<- 
 			"limit":    min(s.data.Capabilities.Core.MaxObjectsInGet, maxQueryBatchSize),
 			"position": pos,
 		}
-		if !after.IsZero() || !before.IsZero() {
-			m := make(map[string]any)
-			if !after.IsZero() {
-				m["after"] = after.UTC().Format(time.RFC3339)
-			}
-			if !before.IsZero() {
-				m["before"] = before.UTC().Format(time.RFC3339)
-			}
-			queryArgs["filter"] = m
+
+		filter := make(map[string]any)
+		if !qf.After.IsZero() {
+			filter["after"] = qf.After.UTC().Format(time.RFC3339)
+		}
+		if !qf.Before.IsZero() {
+			filter["before"] = qf.Before.UTC().Format(time.RFC3339)
+		}
+		if mailboxID != "" {
+			filter["inMailbox"] = mailboxID
+		}
+		if len(filter) > 0 {
+			queryArgs["filter"] = filter
 		}
 
-		jreq := request{
-			Using: []string{
-				"urn:ietf:params:jmap:core",
-				"urn:ietf:params:jmap:mail",
+		res, err := s.sendRequest(
+			ctx,
+			invocation{
+				Name: "Email/query",
+				Args: queryArgs,
+				ID:   "0",
 			},
-			MethodCalls: []invocation{
-				{
-					Name: "Email/query",
-					Args: queryArgs,
-					ID:   "0",
-				},
-				{
-					Name: "Email/get",
-					Args: map[string]any{
-						"accountId": s.accountID,
-						"#ids": map[string]any{
-							"name":     "Email/query",
-							"path":     "/ids/*",
-							"resultOf": "0",
-						},
-						"properties": []string{"blobId", "receivedAt", "subject"},
+			invocation{
+				Name: "Email/get",
+				Args: map[string]any{
+					"accountId": s.accountID,
+					"#ids": map[string]any{
+						"name":     "Email/query",
+						"path":     "/ids/*",
+						"resultOf": "0",
 					},
-					ID: "1",
+					"properties": []string{"blobId", "receivedAt", "subject"},
 				},
+				ID: "1",
 			},
-		}
-
-		b, err := json.Marshal(&jreq)
+		)
 		if err != nil {
 			return err
-		}
-		res, err := s.call(ctx, http.MethodPost, s.data.APIURL, bytes.NewReader(b))
-		if err != nil {
-			return err
-		}
-		defer res.Body.Close()
-
-		var jres response
-		if err := json.NewDecoder(res.Body).Decode(&jres); err != nil {
-			return err
-		} else if n := len(jres.MethodResponses); n != 2 {
-			return fmt.Errorf("got %v method response(s); expected 2", n)
-		} else if id1, id2 := jres.MethodResponses[1].ID, jreq.MethodCalls[1].ID; id1 != id2 {
-			return fmt.Errorf("second method response was for %q; expected %q", id1, id2)
 		}
 		var list []MessageInfo
-		if err := unmarshalAny(jres.MethodResponses[1].Args["list"], &list); err != nil {
+		if err := unmarshalAny(res.MethodResponses[1].Args["list"], &list); err != nil {
 			return err
 		}
 		if len(list) == 0 {
@@ -165,6 +174,28 @@ func (s *Session) Query(ctx context.Context, after, before time.Time, ch chan<- 
 	}
 
 	return nil
+}
+
+// getMailboxID returns the ID for the mailbox with the specified name.
+func (s *Session) getMailboxID(ctx context.Context, name string) (string, error) {
+	res, err := s.sendRequest(ctx, invocation{
+		Name: "Mailbox/query",
+		Args: map[string]any{
+			"accountId": s.accountID,
+			"filter":    map[string]any{"name": name},
+		},
+		ID: "1",
+	})
+	if err != nil {
+		return "", err
+	}
+	var ids []string
+	if err := unmarshalAny(res.MethodResponses[0].Args["ids"], &ids); err != nil {
+		return "", err
+	} else if len(ids) != 1 {
+		return "", fmt.Errorf("got %v IDs; want 1", len(ids))
+	}
+	return ids[0], nil
 }
 
 // unmarshalAny is a dumb helper function that marshals src to JSON and then unmarshals the
@@ -202,6 +233,40 @@ func (s *Session) call(ctx context.Context, method, url string, body io.Reader) 
 type request struct {
 	Using       []string     `json:"using"`
 	MethodCalls []invocation `json:"methodCalls"`
+}
+
+// sendRequest sends a JMAP Mail request with the supplied method calls.
+func (s *Session) sendRequest(ctx context.Context, methodCalls ...invocation) (*response, error) {
+	jreq := request{
+		Using: []string{
+			"urn:ietf:params:jmap:core",
+			"urn:ietf:params:jmap:mail",
+		},
+		MethodCalls: methodCalls,
+	}
+	b, err := json.Marshal(&jreq)
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.call(ctx, http.MethodPost, s.data.APIURL, bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	var jres response
+	if err := json.NewDecoder(res.Body).Decode(&jres); err != nil {
+		return nil, err
+	}
+	if n1, n2 := len(jreq.MethodCalls), len(jres.MethodResponses); n1 != n2 {
+		return nil, fmt.Errorf("send %v method calls(s) but got %v response(s)", n1, n2)
+	}
+	for i := range jreq.MethodCalls {
+		if id1, id2 := jreq.MethodCalls[i].ID, jres.MethodResponses[i].ID; id1 != id2 {
+			return nil, fmt.Errorf("method call and response IDs differ (%q vs. %q)", id1, id2)
+		}
+	}
+	return &jres, nil
 }
 
 // response describes a JMAP response.
