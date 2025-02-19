@@ -16,8 +16,14 @@ import (
 	"time"
 )
 
-// Init creates a maildir at dir if it doesn't already exist.
-func Init(dir string) error {
+// Maildir is used for delivering messages to a maildir.
+type Maildir struct {
+	dir string        // base directory
+	num atomic.Uint64 // monotonically-increasing delivery counter
+}
+
+// New creates a maildir at dir if it doesn't already exist.
+func New(dir string) (*Maildir, error) {
 	for _, p := range []string{
 		dir,
 		filepath.Join(dir, "cur"),
@@ -28,29 +34,26 @@ func Init(dir string) error {
 			if fi.IsDir() {
 				continue
 			}
-			return fmt.Errorf("%v exists as non-directory", p)
+			return nil, fmt.Errorf("%v exists as non-directory", p)
 		}
 		if err := os.Mkdir(p, 0700); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return &Maildir{dir: dir}, nil
 }
 
-// numDelivered is a monotonically-increasing counter of the number of messages that have been
-// delivered by this process.
-var numDelivered atomic.Uint64
-
-// Deliver reads a message from r and writes it to the specified maildir.
-func Deliver(dir string, r io.Reader) (string, error) {
+// Deliver reads a message from r and writes it to md.
+// The message's full path is returned.
+func (md *Maildir) Deliver(r io.Reader) (string, error) {
 	// Create a file in the tmp subdir.
 	host, err := os.Hostname()
 	if err != nil {
 		return "", err
 	}
 	host = strings.ReplaceAll(strings.ReplaceAll(host, "/", "\\057"), ":", "\\072")
-	name := fmt.Sprintf("%v.%v_%v.%v", time.Now().Unix(), os.Getpid(), numDelivered.Add(1), host)
-	tp := filepath.Join(dir, "tmp", name)
+	name := fmt.Sprintf("%v.%v_%v.%v", time.Now().Unix(), os.Getpid(), md.num.Add(1), host)
+	tp := filepath.Join(md.dir, "tmp", name)
 	tf, err := os.OpenFile(tp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return "", err
@@ -68,7 +71,7 @@ func Deliver(dir string, r io.Reader) (string, error) {
 	}
 
 	// Create a file in the new subdir.
-	np := filepath.Join(dir, "new", name)
+	np := filepath.Join(md.dir, "new", name)
 	nf, err := os.OpenFile(np, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		os.Remove(tp)
