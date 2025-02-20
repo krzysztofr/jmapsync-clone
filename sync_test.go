@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +41,11 @@ func TestSync_Basic(t *testing.T) {
 	// Add 5 more messages, wait a few days, and sync.
 	emails = append(emails, session.addEmails(15, 5, date("2024-11-02 15:30:00"), time.Minute)...)
 	doTestSync(t, cfg, session, date("2024-11-06 00:00:00"), true)
+	verifyMaildir(t, cfg.maildir, emails)
+
+	// Add 5 old emails to the server and check that they aren't downloaded.
+	session.addEmails(20, 5, date("2023-11-02 00:00:00"), time.Minute)
+	doTestSync(t, cfg, session, date("2024-11-06 00:05:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 }
 
@@ -85,6 +89,53 @@ func TestSync_DownloadError(t *testing.T) {
 	// Do another sync a bit more than a day later to get all the messages.
 	clear(session.blobErrs)
 	doTestSync(t, cfg, session, date("2024-11-03 15:00:00"), true)
+	verifyMaildir(t, cfg.maildir, emails)
+}
+
+func TestSync_TimeFilter(t *testing.T) {
+	cfg := makeTestConfig(t)
+	session := newTestSession()
+
+	// Add 10 emails, but pass a min time such that only the last 5 are downloaded.
+	emails := session.addEmails(1, 10, date("2024-11-02 14:10:00"), time.Minute)
+	cfg.minTime = date("2024-11-02 14:15:00")
+	doTestSync(t, cfg, session, date("2024-11-02 14:30:00"), true)
+	verifyMaildir(t, cfg.maildir, emails[5:])
+
+	// Sync again about a day later to update the last sync time.
+	doTestSync(t, cfg, session, date("2024-11-03 14:00:00"), true)
+	verifyMaildir(t, cfg.maildir, emails[5:])
+
+	// Doing a regular sync without a min time shouldn't return the earlier emails now.
+	cfg.minTime = time.Time{}
+	doTestSync(t, cfg, session, date("2024-11-03 14:05:00"), true)
+	verifyMaildir(t, cfg.maildir, emails[5:])
+
+	// Pick up the missing messages. A max time needs to be set to avoid duplicates.
+	cfg.minTime = date("2024-11-02 14:10:00")
+	cfg.maxTime = date("2024-11-02 14:15:00")
+	doTestSync(t, cfg, session, date("2024-11-03 14:10:00"), true)
+	verifyMaildir(t, cfg.maildir, emails)
+
+	// Add some old and new messages and clear the min and max times.
+	// We should get the new messages but not the old ones.
+	session.addEmails(10, 5, date("2024-11-02 14:20:00"), time.Minute)
+	emails = append(emails, session.addEmails(15, 5, date("2024-11-03 14:15:00"), time.Minute)...)
+	cfg.minTime = time.Time{}
+	cfg.maxTime = time.Time{}
+	doTestSync(t, cfg, session, date("2024-11-03 14:12:00"), true)
+	verifyMaildir(t, cfg.maildir, emails)
+}
+
+func TestSync_MailboxFilter(t *testing.T) {
+	cfg := makeTestConfig(t)
+	session := newTestSession()
+
+	// Add 5 messages in the "Inbox" mailbox and 5 more in "Sent".
+	emails := session.addEmails(1, 5, date("2024-11-02 14:00:00"), time.Minute, "Inbox")
+	session.addEmails(5, 10, date("2024-11-02 14:05:00"), time.Minute, "Sent")
+	cfg.mailboxName = "Inbox"
+	doTestSync(t, cfg, session, date("2024-11-03 14:15:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 }
 
@@ -144,7 +195,7 @@ func (s *testSession) addEmail(email jmap.Email, mailboxes ...string) {
 	for _, mailbox := range mailboxes {
 		m, ok := s.mailboxes[mailbox]
 		if !ok {
-			m := make(map[string]struct{})
+			m = make(map[string]struct{})
 			s.mailboxes[mailbox] = m
 		}
 		m[email.ID] = struct{}{}
@@ -157,7 +208,7 @@ func (s *testSession) addEmails(base, n int, start time.Time, step time.Duration
 	var emails []jmap.Email
 	for i := range n {
 		id := base + i
-		idStr := strconv.Itoa(id)
+		idStr := fmt.Sprintf("%02d", id)
 		blobID := "B" + idStr
 		email := jmap.Email{
 			ID:         "M" + idStr,
@@ -218,6 +269,7 @@ func verifyMaildir(t *testing.T, dir string, emails []jmap.Email) {
 		t.Fatal("Failed reading maildir:", err)
 	}
 	maildirIDs := make(map[string]struct{}, len(entries))
+	dupeIDs := make(map[string]struct{})
 	for _, ent := range entries {
 		if !ent.Type().IsRegular() {
 			continue
@@ -225,6 +277,9 @@ func verifyMaildir(t *testing.T, dir string, emails []jmap.Email) {
 		b, err := os.ReadFile(filepath.Join(newDir, ent.Name()))
 		if err != nil {
 			t.Fatal("Failed reading message:", err)
+		}
+		if _, ok := maildirIDs[string(b)]; ok {
+			dupeIDs[string(b)] = struct{}{}
 		}
 		maildirIDs[string(b)] = struct{}{}
 	}
@@ -237,6 +292,9 @@ func verifyMaildir(t *testing.T, dir string, emails []jmap.Email) {
 	if !maps.Equal(maildirIDs, emailIDs) {
 		t.Fatalf("%v doesn't contain desired messages:\nWant: %v\nGot:  %v",
 			newDir, stringifySet(emailIDs), stringifySet(maildirIDs))
+	}
+	if len(dupeIDs) > 0 {
+		t.Fatalf("%v contains duplicate messages: %v", newDir, stringifySet(dupeIDs))
 	}
 }
 

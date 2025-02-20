@@ -178,19 +178,28 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	}
 
 	if !cfg.list {
-		if err := db.setLastSyncStart(cfg.startTime); err != nil {
-			return cmdErrorf(1, "Failed updating last sync time: %v", err)
-		}
-
-		// Clean up old synced IDs that we didn't see again this time.
-		delIDs := make([]string, 0, len(oldIDs))
-		for id := range oldIDs {
-			if !setContains(newIDs, id) {
-				delIDs = append(delIDs, id)
+		// Only update last-sync-related state if a max time wasn't set.
+		if cfg.maxTime.IsZero() {
+			vlog.Logf(ctx, "Setting last sync time to %v", cfg.startTime)
+			if err := db.setLastSyncStart(cfg.startTime); err != nil {
+				return cmdErrorf(1, "Failed updating last sync time: %v", err)
 			}
-		}
-		if err := db.removeLastSyncIDs(delIDs); err != nil {
-			return cmdErrorf(1, "Failed cleaning old synced IDs: %v", err)
+
+			// Clean up old synced IDs that we didn't see again this time.
+			delIDs := make([]string, 0, len(oldIDs))
+			for id := range oldIDs {
+				if !setContains(newIDs, id) {
+					delIDs = append(delIDs, id)
+				}
+			}
+			if len(delIDs) > 0 {
+				vlog.Logf(ctx, "Removing %d old synced ID(s)", len(delIDs))
+				if err := db.removeLastSyncIDs(delIDs); err != nil {
+					return cmdErrorf(1, "Failed cleaning old synced IDs: %v", err)
+				}
+			}
+		} else {
+			vlog.Log(ctx, "Not setting sync state since max time was set")
 		}
 
 		err := db.close()
