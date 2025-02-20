@@ -22,68 +22,80 @@ import (
 )
 
 func TestSync_Basic(t *testing.T) {
-	var stdout bytes.Buffer
-	cfg := syncConfig{
-		dbPath:  filepath.Join(t.TempDir(), "state.db"),
-		maildir: filepath.Join(t.TempDir(), "mail"),
-		stdout:  &stdout,
-	}
+	cfg := makeTestConfig(t)
 	session := newTestSession()
 
 	// Add 10 messages and sync them.
 	emails := session.addEmails(1, 10, date("2024-11-02 14:15:00"), time.Minute)
-	doTestSync(t, cfg, session, date("2024-11-02 15:00:00"))
+	doTestSync(t, cfg, session, date("2024-11-02 15:00:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 
 	// Doing another sync a minute later should be a no-op.
-	doTestSync(t, cfg, session, date("2024-11-02 15:01:00"))
+	doTestSync(t, cfg, session, date("2024-11-02 15:01:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 
 	// Add 5 more messages and sync them.
 	emails = append(emails, session.addEmails(11, 5, date("2024-11-02 15:15:00"), time.Minute)...)
-	doTestSync(t, cfg, session, date("2024-11-02 15:25:00"))
+	doTestSync(t, cfg, session, date("2024-11-02 15:25:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 
 	// Add 5 more messages, wait a few days, and sync.
 	emails = append(emails, session.addEmails(15, 5, date("2024-11-02 15:30:00"), time.Minute)...)
-	doTestSync(t, cfg, session, date("2024-11-06 00:00:00"))
+	doTestSync(t, cfg, session, date("2024-11-06 00:00:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 }
 
 func TestSync_QueryError(t *testing.T) {
-	var stdout bytes.Buffer
-	cfg := syncConfig{
-		dbPath:        filepath.Join(t.TempDir(), "state.db"),
-		maildir:       filepath.Join(t.TempDir(), "mail"),
-		stdout:        &stdout,
-		queryChanSize: 1,
-	}
+	cfg := makeTestConfig(t)
 	session := newTestSession()
 
 	// Do a no-op sync to set the last sync time.
-	doTestSync(t, cfg, session, date("2024-11-02 14:00:00"))
+	doTestSync(t, cfg, session, date("2024-11-02 14:00:00"), true)
 
 	// Add 10 emails, but make the query fail after the first 3 are returned.
 	emails := session.addEmails(1, 10, date("2024-11-02 14:15:00"), time.Minute)
 	session.errAfter = 3
-	cfg.startTime = date("2024-11-02 15:00:00")
-	if cmdErr := sync(context.Background(), cfg, session); cmdErr == nil {
-		t.Fatalf("Sync succeeded despite query error")
-	}
+	doTestSync(t, cfg, session, date("2024-11-02 15:00:00"), false)
 	verifyMaildir(t, cfg.maildir, emails[:3])
 
 	// Do another sync that gets a few more messages.
 	session.errAfter = 6
-	cfg.startTime = date("2024-11-02 15:00:20")
-	if cmdErr := sync(context.Background(), cfg, session); cmdErr == nil {
-		t.Fatalf("Sync succeeded despite query error")
-	}
+	doTestSync(t, cfg, session, date("2024-11-02 15:00:20"), false)
 	verifyMaildir(t, cfg.maildir, emails[:6])
 
 	// Do a successful sync a day later to get the rest of the messages.
 	session.errAfter = 0
-	doTestSync(t, cfg, session, date("2024-11-03 15:00:00"))
+	doTestSync(t, cfg, session, date("2024-11-03 15:00:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
+}
+
+func TestSync_DownloadError(t *testing.T) {
+	cfg := makeTestConfig(t)
+	session := newTestSession()
+
+	// Do a no-op sync to set the last sync time.
+	doTestSync(t, cfg, session, date("2024-11-02 14:00:00"), true)
+
+	// Add 10 emails, but make the fifth download fail.
+	emails := session.addEmails(1, 10, date("2024-11-02 14:15:00"), time.Minute)
+	session.blobErrs[emails[4].BlobID] = struct{}{}
+	doTestSync(t, cfg, session, date("2024-11-02 14:30:00"), false)
+	verifyMaildir(t, cfg.maildir, emails[:4])
+
+	// Do another sync a bit more than a day later to get all the messages.
+	clear(session.blobErrs)
+	doTestSync(t, cfg, session, date("2024-11-03 15:00:00"), true)
+	verifyMaildir(t, cfg.maildir, emails)
+}
+
+// makeTestConfig returns a new base syncConfig for a test to use.
+func makeTestConfig(t *testing.T) syncConfig {
+	return syncConfig{
+		dbPath:        filepath.Join(t.TempDir(), "state.db"),
+		maildir:       filepath.Join(t.TempDir(), "mail"),
+		stdout:        &bytes.Buffer{},
+		queryChanSize: 1,
+	}
 }
 
 // date parses a time in "YYYY-MM-DD HH:MM:SS" format.
@@ -96,11 +108,13 @@ func date(s string) time.Time {
 }
 
 // doTestSync calls sync() using a copy of cfg with the supplied startTime.
-func doTestSync(t *testing.T, cfg syncConfig, s *testSession, startTime time.Time) {
+func doTestSync(t *testing.T, cfg syncConfig, s *testSession, startTime time.Time, wantSuccess bool) {
 	t.Helper()
 	cfg.startTime = startTime
-	if cmdErr := sync(context.Background(), cfg, s); cmdErr != nil {
+	if cmdErr := sync(context.Background(), cfg, s); wantSuccess && cmdErr != nil {
 		t.Fatalf("Sync failed with exit code %v: %v", cmdErr.code, cmdErr.msg)
+	} else if !wantSuccess && cmdErr == nil {
+		t.Fatal("Sync unexpectedly succeeded")
 	}
 }
 
@@ -110,7 +124,8 @@ type testSession struct {
 	blobs     map[string]string              // BlobID -> ID
 	mailboxes map[string]map[string]struct{} // mailbox name -> set of email IDs
 
-	errAfter int // if non-zero, report error after sending this many query results
+	errAfter int                 // if non-zero, report error after sending this many query results
+	blobErrs map[string]struct{} // report errors when downloading these blobIDs
 }
 
 func newTestSession() *testSession {
@@ -118,6 +133,7 @@ func newTestSession() *testSession {
 		emails:    make(map[string]jmap.Email),
 		blobs:     make(map[string]string),
 		mailboxes: make(map[string]map[string]struct{}),
+		blobErrs:  make(map[string]struct{}),
 	}
 }
 
@@ -175,7 +191,7 @@ func (s *testSession) Query(ctx context.Context, cfg jmap.QueryConfig, ch chan<-
 	for i, email := range emails {
 		ch <- email
 		if i+1 == s.errAfter {
-			return errors.New("intentional failure")
+			return errors.New("intentional error")
 		}
 	}
 	return nil
@@ -185,11 +201,14 @@ func (s *testSession) Download(ctx context.Context, blobID string) (io.ReadClose
 	if _, ok := s.blobs[blobID]; !ok {
 		return nil, errors.New("not found")
 	}
+	if setContains(s.blobErrs, blobID) {
+		return nil, errors.New("intentional error")
+	}
 	return (*stringsReaderCloser)(strings.NewReader(blobID)), nil
 }
 
 // verifyMaildir verifies that dir contains exactly the supplied emails.
-// The contents of each file in the maildir must be the corresponding message's BlobID.
+// Each file in the maildir must contain the corresponding message's BlobID.
 func verifyMaildir(t *testing.T, dir string, emails []jmap.Email) {
 	t.Helper()
 
