@@ -1,0 +1,7 @@
+steps:
+  - name: golang
+    entrypoint: go
+    args: ['test', '-v', './...']
+  - name: golang
+    entrypoint: go
+    args: ['build']
