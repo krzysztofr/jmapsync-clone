@@ -16,10 +16,12 @@ import (
 	"time"
 )
 
-// Maildir is used for delivering messages to a maildir.
+// num is a monotonically-increasing delivery counter.
+var num atomic.Uint64
+
+// Maildir delivers messages to a maildir.
 type Maildir struct {
-	dir string        // base directory
-	num atomic.Uint64 // monotonically-increasing delivery counter
+	dir string // base directory
 }
 
 // New creates a maildir at dir if it doesn't already exist.
@@ -52,7 +54,7 @@ func (md *Maildir) Deliver(r io.Reader) (string, error) {
 		return "", err
 	}
 	host = strings.ReplaceAll(strings.ReplaceAll(host, "/", "\\057"), ":", "\\072")
-	name := fmt.Sprintf("%v.%v_%v.%v", time.Now().Unix(), os.Getpid(), md.num.Add(1), host)
+	name := fmt.Sprintf("%v.%v_%v.%v", time.Now().Unix(), os.Getpid(), num.Add(1), host)
 	tp := filepath.Join(md.dir, "tmp", name)
 	tf, err := os.OpenFile(tp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -31,11 +32,12 @@ const (
 type syncConfig struct {
 	dbPath      string    // path to stateDB SQLite file
 	maildir     string    // path to destination maildir
-	minTime     time.Time // min receivedAt time
-	maxTime     time.Time // max receivedAt type
+	minTime     time.Time // min receivedAt time (inclusive)
+	maxTime     time.Time // max receivedAt time (exclusive)
 	mailboxName string    // mailbox to sync; empty for all
 	startTime   time.Time // time when sync started
 	list        bool      // list messages instead of downloading them
+	stdout      io.Writer // write progress here instead of stdout if non-nil
 }
 
 // sync uses session to sync messages per cfg.
@@ -52,6 +54,11 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	var db *stateDB
 
 	vlog.Log(ctx, "Starting sync")
+
+	stdout := cfg.stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
 
 	if !cfg.list {
 		if cfg.maildir == "" {
@@ -131,7 +138,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			if len(email.From) > 0 {
 				from = truncate(email.From[0].Email, emailAddressWidth, true /* elide */)
 			}
-			fmt.Printf("%v  %-"+strconv.Itoa(emailAddressWidth)+"s  %v\n", email.ID, from, email.Subject)
+			fmt.Fprintf(stdout, "%v  %-"+strconv.Itoa(emailAddressWidth)+"s  %v\n", email.ID, from, email.Subject)
 			continue
 		}
 
@@ -141,7 +148,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 
 		// Don't download the message again if we already got it last time.
 		if setContains(oldIDs, email.ID) {
-			fmt.Printf("["+countFmt+"/"+countFmt+"] %v    (already seen)\n",
+			fmt.Fprintf(stdout, "["+countFmt+"/"+countFmt+"] %v    (already seen)\n",
 				emailIdx, totalEmails, email.ID)
 			continue
 		}
@@ -157,7 +164,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			return cmdErrorf(1, "Failed delivering message %v: %v", email.ID, err)
 		}
 
-		fmt.Printf("["+countFmt+"/"+countFmt+"] %v -> %v (%v bytes)\n",
+		fmt.Fprintf(stdout, "["+countFmt+"/"+countFmt+"] %v -> %v (%v bytes)\n",
 			emailIdx, totalEmails, email.ID, filepath.Base(p), email.Size)
 		vlog.Logf(ctx, "Delivered %v to %v", email.ID, p)
 
