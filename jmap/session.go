@@ -3,8 +3,8 @@
 
 // Package jmap fetches email messages from a JMAP Mail server.
 //
-//	https://datatracker.ietf.org/doc/rfc8620/
-//	https://datatracker.ietf.org/doc/rfc8621/
+//	https://jmap.io/spec-core.html, https://datatracker.ietf.org/doc/rfc8620/
+//	https://jmap.io/spec-mail.html, https://datatracker.ietf.org/doc/rfc8621/
 package jmap
 
 import (
@@ -13,20 +13,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 )
 
 const (
+	coreURN = "urn:ietf:params:jmap:core"
+	mailURN = "urn:ietf:params:jmap:mail"
+
 	maxQueryBatchSize = 500
 )
-
-var reqUsing = []string{
-	"urn:ietf:params:jmap:core",
-	"urn:ietf:params:jmap:mail",
-}
 
 // Session is a JMAP Mail session.
 type Session struct {
@@ -43,9 +40,13 @@ type Session struct {
 			IsPersonal bool   `json:"isPersonal"`
 			IsReadOnly bool   `json:"isReadOnly"`
 		}
-		Capabilities struct {
+		PrimaryAccounts map[string]string `json:"primaryAccounts"`
+		Capabilities    struct {
 			Core struct {
-				MaxObjectsInGet int `json:"maxObjectsInGet"`
+				MaxSizeRequest        uint64 `json:"maxSizeRequest"`
+				MaxConcurrentRequests uint64 `json:"maxConcurrentRequests"`
+				MaxCallsInRequest     uint64 `json:"maxCallsInRequest"`
+				MaxObjectsInGet       uint64 `json:"maxObjectsInGet"`
 			} `json:"urn:ietf:params:jmap:core"`
 		}
 	}
@@ -55,20 +56,18 @@ type Session struct {
 // The supplied token is sent in an Authorization bearer header.
 func NewSession(ctx context.Context, url, token string) (*Session, error) {
 	s := Session{token: token}
-	res, err := s.call(ctx, http.MethodGet, url, nil)
+	res, err := s.sendHTTPRequest(ctx, http.MethodGet, url, nil)
+	if res != nil {
+		defer res.Body.Close()
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
 	if err := json.NewDecoder(res.Body).Decode(&s.data); err != nil {
 		return nil, err
 	}
-	if len(s.data.Accounts) != 1 {
-		return nil, fmt.Errorf("got %v accounts; want 1", len(s.data.Accounts))
-	}
-	for k := range s.data.Accounts {
-		s.accountID = k
-		break
+	if s.accountID = s.data.PrimaryAccounts[mailURN]; s.accountID == "" {
+		return nil, fmt.Errorf("no primary account for %v", mailURN)
 	}
 	return &s, nil
 }
@@ -85,6 +84,8 @@ type Email struct {
 	Subject string `json:"subject"`
 	// ReceivedAt is the time the message was received by the server.
 	ReceivedAt time.Time `json:"receivedAt"`
+	// Size contains the message's raw data size in octets.
+	Size uint64 `json:"size"`
 }
 
 // EmailAddress describes an email address in a message header.
@@ -95,49 +96,50 @@ type EmailAddress struct {
 	Name string `json:"name"`
 }
 
-// QueryFilter configures which messages are returned by Query.
-type QueryFilter struct {
-	// After is a lower bound for messages' "receivedAt" dates.
+// QueryConfig configures Query's behavior.
+type QueryConfig struct {
+	// After is an inclusive lower bound for messages' "receivedAt" dates.
 	After time.Time
-	// Before is an upper bound for messages' "receivedAt" dates.
+	// Before is an exclusive upper bound for messages' "receivedAt" dates.
 	Before time.Time
 	// MailboxName is the name of a mailbox that messages must be in, e.g. "Inbox" or "Sent".
 	MailboxName string
+	// TotalEmailsOut is set (if non-nil) to the total number of messages before any writes to ch occur.
+	TotalEmailsOut *uint64
 }
 
-// Query fetches information about messages matched by QueryFilter.
+// Query fetches information about messages.
 // Results are written to ch, which is always closed before returning.
-func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- Email) error {
+func (s *Session) Query(ctx context.Context, cfg QueryConfig, ch chan<- Email) error {
 	defer close(ch)
 
 	var mailboxID string
-	if qf.MailboxName != "" {
+	if cfg.MailboxName != "" {
 		var err error
-		if mailboxID, err = s.getMailboxID(ctx, qf.MailboxName); err != nil {
+		if mailboxID, err = s.getMailboxID(ctx, cfg.MailboxName); err != nil {
 			return fmt.Errorf("get mailbox ID: %w", err)
 		}
 	}
 
-	var pos int
+	var pos uint64
 	for {
-		log.Printf("Querying at position %v", pos)
-
 		queryArgs := map[string]any{
 			"accountId": s.accountID,
 			"sort": []map[string]any{{
 				"property":    "receivedAt",
 				"isAscending": true,
 			}},
-			"limit":    min(s.data.Capabilities.Core.MaxObjectsInGet, maxQueryBatchSize),
-			"position": pos,
+			"limit":          min(s.data.Capabilities.Core.MaxObjectsInGet, maxQueryBatchSize),
+			"position":       pos,
+			"calculateTotal": true,
 		}
 
 		filter := make(map[string]any)
-		if !qf.After.IsZero() {
-			filter["after"] = qf.After.UTC().Format(time.RFC3339)
+		if !cfg.After.IsZero() {
+			filter["after"] = cfg.After.UTC().Format(time.RFC3339)
 		}
-		if !qf.Before.IsZero() {
-			filter["before"] = qf.Before.UTC().Format(time.RFC3339)
+		if !cfg.Before.IsZero() {
+			filter["before"] = cfg.Before.UTC().Format(time.RFC3339)
 		}
 		if mailboxID != "" {
 			filter["inMailbox"] = mailboxID
@@ -146,7 +148,7 @@ func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- Email) er
 			queryArgs["filter"] = filter
 		}
 
-		res, err := s.sendRequest(
+		res, err := s.sendJMAPRequest(
 			ctx,
 			invocation{
 				Name: "Email/query",
@@ -163,7 +165,7 @@ func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- Email) er
 						"resultOf": "0",
 					},
 					// TODO: Maybe make it configurable whether from/subject/etc. are fetched.
-					"properties": []string{"blobId", "receivedAt", "from", "subject"},
+					"properties": []string{"blobId", "receivedAt", "size", "from", "subject"},
 				},
 				ID: "1",
 			},
@@ -171,6 +173,24 @@ func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- Email) er
 		if err != nil {
 			return err
 		}
+
+		qargs := res.MethodResponses[0].Args
+		var rpos uint64
+		if err := unmarshalAny(qargs["position"], &rpos); err != nil {
+			return err
+		}
+		if rpos != pos {
+			return fmt.Errorf("asked for position %v but got %v", pos, rpos)
+		}
+
+		var total uint64
+		if err := unmarshalAny(qargs["total"], &total); err != nil {
+			return err
+		}
+		if cfg.TotalEmailsOut != nil && pos == 0 {
+			*cfg.TotalEmailsOut = total
+		}
+
 		var list []Email
 		if err := unmarshalAny(res.MethodResponses[1].Args["list"], &list); err != nil {
 			return err
@@ -181,7 +201,10 @@ func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- Email) er
 		for _, em := range list {
 			ch <- em
 		}
-		pos += len(list)
+		pos += uint64(len(list))
+		if pos >= total {
+			break
+		}
 	}
 
 	return nil
@@ -189,7 +212,7 @@ func (s *Session) Query(ctx context.Context, qf QueryFilter, ch chan<- Email) er
 
 // getMailboxID returns the ID for the mailbox with the specified name.
 func (s *Session) getMailboxID(ctx context.Context, name string) (string, error) {
-	res, err := s.sendRequest(ctx, invocation{
+	res, err := s.sendJMAPRequest(ctx, invocation{
 		Name: "Mailbox/query",
 		Args: map[string]any{
 			"accountId": s.accountID,
@@ -221,9 +244,10 @@ func unmarshalAny(src any, dst any) error {
 	return json.Unmarshal(b, &dst)
 }
 
-// call makes an HTTP call to the specified URL using s.token.
-// The caller is responsible for closing the response's Body iff the returned error is non-nil.
-func (s *Session) call(ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
+// sendHTTPRequest makes an HTTP request for the specified URL using s.token.
+// If an http.Response is returned, the caller is responsibly for closing its Body member regardless
+// of whether the returned error is nil or non-nil.
+func (s *Session) sendHTTPRequest(ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, err
@@ -232,10 +256,10 @@ func (s *Session) call(ctx context.Context, method, url string, body io.Reader) 
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned %v: %v", res.StatusCode, res.Status)
+		return res, fmt.Errorf("server returned %v: %v", res.StatusCode, res.Status)
 	}
 	return res, nil
 }
@@ -246,35 +270,52 @@ type request struct {
 	MethodCalls []invocation `json:"methodCalls"`
 }
 
-// sendRequest sends a JMAP Mail request with the supplied method calls.
-func (s *Session) sendRequest(ctx context.Context, methodCalls ...invocation) (*response, error) {
+type problemDetails struct {
+	Type   string `json:"type"`
+	Status int    `json:"status"`
+	Detail string `json:"detail"`
+}
+
+// sendJMAPRequest sends a JMAP Mail request with the supplied method calls.
+func (s *Session) sendJMAPRequest(ctx context.Context, methodCalls ...invocation) (*response, error) {
 	jreq := request{
-		Using: []string{
-			"urn:ietf:params:jmap:core",
-			"urn:ietf:params:jmap:mail",
-		},
+		Using:       []string{coreURN, mailURN},
 		MethodCalls: methodCalls,
 	}
 	b, err := json.Marshal(&jreq)
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.call(ctx, http.MethodPost, s.data.APIURL, bytes.NewReader(b))
+	res, err := s.sendHTTPRequest(ctx, http.MethodPost, s.data.APIURL, bytes.NewReader(b))
+	if res != nil {
+		defer res.Body.Close()
+	}
 	if err != nil {
+		// Try to extract details from the body.
+		if res != nil {
+			var prob problemDetails
+			if derr := json.NewDecoder(res.Body).Decode(&prob); derr == nil {
+				return nil, fmt.Errorf("%w (detail: %q)", err, prob.Detail)
+			}
+		}
 		return nil, err
 	}
-	defer res.Body.Close()
 
 	var jres response
 	if err := json.NewDecoder(res.Body).Decode(&jres); err != nil {
 		return nil, err
 	}
 	if n1, n2 := len(jreq.MethodCalls), len(jres.MethodResponses); n1 != n2 {
-		return nil, fmt.Errorf("send %v method calls(s) but got %v response(s)", n1, n2)
+		return &jres, fmt.Errorf("sent %v method calls(s) but got %v response(s)", n1, n2)
 	}
 	for i := range jreq.MethodCalls {
 		if id1, id2 := jreq.MethodCalls[i].ID, jres.MethodResponses[i].ID; id1 != id2 {
-			return nil, fmt.Errorf("method call and response IDs differ (%q vs. %q)", id1, id2)
+			return &jres, fmt.Errorf("method call and response IDs differ (%q vs. %q)", id1, id2)
+		}
+		if mr := jres.MethodResponses[i]; mr.Name == "error" {
+			// TODO: Get the "type" field for more details per RFC 8620 3.6.2.
+			errType, _ := mr.Args["type"]
+			return &jres, fmt.Errorf("method call %v failed: %v", mr.ID, errType)
 		}
 	}
 	return &jres, nil
@@ -316,7 +357,7 @@ func (s *Session) Download(ctx context.Context, blobID string) (io.ReadCloser, e
 		}
 		u = strings.ReplaceAll(u, key, val)
 	}
-	res, err := s.call(ctx, http.MethodGet, u, nil)
+	res, err := s.sendHTTPRequest(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}

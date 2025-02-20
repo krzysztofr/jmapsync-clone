@@ -39,10 +39,12 @@ type syncConfig struct {
 
 // sync uses session to sync messages per cfg.
 func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
-	filter := jmap.QueryFilter{
-		After:       cfg.minTime,
-		Before:      cfg.maxTime,
-		MailboxName: cfg.mailboxName,
+	var totalEmails uint64
+	qcfg := jmap.QueryConfig{
+		After:          cfg.minTime,
+		Before:         cfg.maxTime,
+		MailboxName:    cfg.mailboxName,
+		TotalEmailsOut: &totalEmails,
 	}
 	oldIDs := make(map[string]struct{})
 	var mdir *maildir.Maildir
@@ -65,12 +67,12 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 
 		// Sync messages received since slightly before the last sync if the user didn't specify a
 		// minimum time.
-		if filter.After.IsZero() {
-			if filter.After, err = db.getLastSyncStart(); err != nil {
+		if qcfg.After.IsZero() {
+			if qcfg.After, err = db.getLastSyncStart(); err != nil {
 				return cmdErrorf(1, "Failed getting last sync time: %v", err)
 			}
-			if !filter.After.IsZero() {
-				filter.After = filter.After.Add(-syncOverlapDur)
+			if !qcfg.After.IsZero() {
+				qcfg.After = qcfg.After.Add(-syncOverlapDur)
 			}
 		}
 
@@ -92,13 +94,15 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	emailChan := make(chan jmap.Email, queryChanSize)
 	errChan := make(chan error, 1)
 	go func() {
-		if err := session.Query(ctx, filter, emailChan); err != nil {
+		if err := session.Query(ctx, qcfg, emailChan); err != nil {
 			errChan <- err
 		}
 		close(errChan)
 	}()
 
 	// Download messages as we receive IDs.
+	var emailIdx int
+	var countFmt string
 	newIDs := make(map[string]struct{})
 	for email := range emailChan {
 		// If the query failed, don't bother downloading messages.
@@ -106,37 +110,54 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			break
 		}
 
+		emailIdx++
+
+		// Make sure we don't handle the message again if we saw it earlier due to
+		// batching weirdness -- I didn't see anything in the RFCs about query cursors,
+		// so I'm worried the results could change while we're fetching them.
+		if setContains(newIDs, email.ID) {
+			// TODO: Log something here?
+			continue
+		}
+		newIDs[email.ID] = struct{}{}
+
 		if cfg.list {
 			var from string
 			if len(email.From) > 0 {
 				from = truncate(email.From[0].Email, emailAddressWidth, true /* elide */)
 			}
 			fmt.Printf("%v  %-"+strconv.Itoa(emailAddressWidth)+"s  %v\n", email.ID, from, email.Subject)
-		} else {
-			newIDs[email.ID] = struct{}{}
-
-			// Don't download the message again if we already got it last time.
-			if _, ok := oldIDs[email.ID]; !ok {
-				continue
-			}
-
-			r, err := session.Download(ctx, email.BlobID)
-			if err != nil {
-				return cmdErrorf(1, "Failed downloading message %v (blob %v): %v", email.ID, email.BlobID, err)
-			}
-			p, err := mdir.Deliver(r)
-			r.Close()
-			if err != nil {
-				return cmdErrorf(1, "Failed delivering message %v: %v", email.ID, err)
-			}
-
-			// Record the ID so we don't download it again next time.
-			if err := db.addLastSyncID(email.ID); err != nil {
-				return cmdErrorf(1, "Failed recording synced ID: %v", err)
-			}
-
-			fmt.Printf("%v -> %v\n", email.ID, filepath.Base(p))
+			continue
 		}
+
+		if countFmt == "" {
+			countFmt = "%" + strconv.Itoa(len(fmt.Sprint(totalEmails))) + "d"
+		}
+
+		// Don't download the message again if we already got it last time.
+		if setContains(oldIDs, email.ID) {
+			fmt.Printf("["+countFmt+"/"+countFmt+"] %v    (already seen)\n",
+				emailIdx, totalEmails, email.ID)
+			continue
+		}
+
+		r, err := session.Download(ctx, email.BlobID)
+		if err != nil {
+			return cmdErrorf(1, "Failed downloading message %v (blob %v): %v", email.ID, email.BlobID, err)
+		}
+		p, err := mdir.Deliver(r)
+		r.Close()
+		if err != nil {
+			return cmdErrorf(1, "Failed delivering message %v: %v", email.ID, err)
+		}
+
+		// Record the ID so we don't download it again next time.
+		if err := db.addLastSyncID(email.ID); err != nil {
+			return cmdErrorf(1, "Failed recording synced ID: %v", err)
+		}
+
+		fmt.Printf("["+countFmt+"/"+countFmt+"] %v -> %v (%v bytes)\n",
+			emailIdx, totalEmails, email.ID, filepath.Base(p), email.Size)
 	}
 	if err := <-errChan; err != nil {
 		return cmdErrorf(1, "Failed querying for messages: %v", err)
@@ -150,7 +171,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 		// Clean up old synced IDs that we didn't see again this time.
 		delIDs := make([]string, 0, len(oldIDs))
 		for id := range oldIDs {
-			if _, ok := newIDs[id]; !ok {
+			if !setContains(newIDs, id) {
 				delIDs = append(delIDs, id)
 			}
 		}
@@ -179,16 +200,27 @@ func cmdErrorf(code int, format string, args ...any) *cmdError {
 
 // session wraps jmap.Session for testing.
 type session interface {
-	Query(ctx context.Context, filter jmap.QueryFilter, ch chan<- jmap.Email) error
+	Query(ctx context.Context, cfg jmap.QueryConfig, ch chan<- jmap.Email) error
 	Download(ctx context.Context, blobID string) (io.ReadCloser, error)
 }
 
-func truncate(s string, max int, elide bool) string {
-	if len(s) <= max {
-		return s
+// setContains returns true if s contains k.
+func setContains(s map[string]struct{}, k string) bool {
+	_, ok := s[k]
+	return ok
+}
+
+// truncate truncates orig to at most max runes.
+func truncate(orig string, max int, elide bool) string {
+	if orig == "" || max <= 0 {
+		return ""
+	}
+	runes := []rune(orig)
+	if len(runes) <= max {
+		return orig
 	}
 	if elide {
-		return s[:max-1] + "…"
+		return string(runes[:max-1]) + "…"
 	}
-	return s[:max]
+	return string(runes[:max])
 }

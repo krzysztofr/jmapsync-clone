@@ -17,6 +17,12 @@ import (
 
 func main() {
 	var cfg syncConfig
+
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %v [flag]...\n"+
+			"Download email messages from a JMAP server.\n\n", os.Args[0])
+		flag.PrintDefaults()
+	}
 	flag.StringVar(&cfg.dbPath, "db", filepath.Join(os.Getenv("HOME"), ".jmapsync.db"), "SQLite database for storing last sync state")
 	flag.StringVar(&cfg.maildir, "maildir", "", "Destination maildir directory (created if it doesn't exist)")
 	flag.StringVar(&cfg.mailboxName, "mailbox", "", "Name of mailbox to sync (empty to sync all messages)")
@@ -27,6 +33,12 @@ func main() {
 	flag.Parse()
 
 	rv := func() int {
+		if flag.NArg() != 0 {
+			fmt.Fprintln(os.Stderr, "Positional arguments unsupported")
+			flag.Usage()
+			return 2
+		}
+
 		// Read the auth token from .netrc.
 		u, err := url.Parse(*sessionURL)
 		if err != nil {
