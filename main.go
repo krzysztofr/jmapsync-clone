@@ -7,12 +7,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
 	"codeberg.org/derat/jmapsync/jmap"
+	"codeberg.org/derat/jmapsync/vlog"
 )
 
 func main() {
@@ -29,6 +31,7 @@ func main() {
 	flag.BoolVar(&cfg.list, "list", false, "List all matching messages instead of syncing them")
 	flag.Var((*timeValue)(&cfg.minTime), "min-time", "Minimum received-at RFC 3339 time (empty to get all since last sync)")
 	flag.Var((*timeValue)(&cfg.maxTime), "max-time", "Maximum received-at RFC 3339 time (empty to not set limit)")
+	logPath := flag.String("log-file", "", "Path to file where verbose logs will be written")
 	sessionURL := flag.String("session-url", "https://api.fastmail.com/jmap/session", "JMAP Session resource URL")
 	flag.Parse()
 
@@ -55,8 +58,22 @@ func main() {
 			return 2
 		}
 
-		// Start the session.
 		ctx := context.Background()
+		if *logPath != "" {
+			f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Failed creating log file:", err)
+				return 1
+			}
+			defer func() {
+				if err := f.Close(); err != nil {
+					fmt.Fprintln(os.Stderr, "Failed closing log file:", err)
+				}
+			}()
+			ctx = vlog.LoggerContext(ctx, log.New(f, "", log.LstdFlags|log.Lmicroseconds))
+		}
+
+		// Start the session.
 		session, err := jmap.NewSession(ctx, *sessionURL, machine.password)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed getting session from %v: %v\n", *sessionURL, err)
@@ -67,8 +84,10 @@ func main() {
 		cfg.startTime = time.Now()
 		if cerr := sync(ctx, cfg, session); cerr != nil {
 			fmt.Fprintln(os.Stderr, cerr.msg)
+			vlog.Logf(ctx, "Error: %v", cerr.msg)
 			return cerr.code
 		}
+		vlog.Log(ctx, "Exiting successfully")
 		return 0
 	}()
 	os.Exit(rv)

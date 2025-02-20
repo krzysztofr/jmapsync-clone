@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"codeberg.org/derat/jmapsync/vlog"
 )
 
 const (
@@ -119,6 +121,7 @@ func (s *Session) Query(ctx context.Context, cfg QueryConfig, ch chan<- Email) e
 		if mailboxID, err = s.getMailboxID(ctx, cfg.MailboxName); err != nil {
 			return fmt.Errorf("get mailbox ID: %w", err)
 		}
+		vlog.Logf(ctx, "Mailbox %q has ID %v", cfg.MailboxName, mailboxID)
 	}
 
 	var pos uint64
@@ -148,6 +151,7 @@ func (s *Session) Query(ctx context.Context, cfg QueryConfig, ch chan<- Email) e
 			queryArgs["filter"] = filter
 		}
 
+		vlog.Logf(ctx, "Sending request for position %v with filter %v", pos, filter)
 		res, err := s.sendJMAPRequest(
 			ctx,
 			invocation{
@@ -196,8 +200,10 @@ func (s *Session) Query(ctx context.Context, cfg QueryConfig, ch chan<- Email) e
 			return err
 		}
 		if len(list) == 0 {
+			vlog.Logf(ctx, "Got 0 emails")
 			break
 		}
+		vlog.Logf(ctx, "Got %v email(s) (%v-%v/%v)", len(list), pos+1, pos+uint64(len(list)), total)
 		for _, em := range list {
 			ch <- em
 		}

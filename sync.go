@@ -13,6 +13,7 @@ import (
 
 	"codeberg.org/derat/jmapsync/jmap"
 	"codeberg.org/derat/jmapsync/maildir"
+	"codeberg.org/derat/jmapsync/vlog"
 )
 
 const (
@@ -50,6 +51,8 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	var mdir *maildir.Maildir
 	var db *stateDB
 
+	vlog.Log(ctx, "Starting sync")
+
 	if !cfg.list {
 		if cfg.maildir == "" {
 			return cmdErrorf(2, "No destination maildir specified")
@@ -71,8 +74,10 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			if qcfg.After, err = db.getLastSyncStart(); err != nil {
 				return cmdErrorf(1, "Failed getting last sync time: %v", err)
 			}
+			vlog.Log(ctx, "Last sync started at ", qcfg.After)
 			if !qcfg.After.IsZero() {
 				qcfg.After = qcfg.After.Add(-syncOverlapDur)
+				vlog.Log(ctx, "Will request messages received after ", qcfg.After)
 			}
 		}
 
@@ -141,6 +146,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			continue
 		}
 
+		vlog.Logf(ctx, "Downloading %v (blob %v)", email.ID, email.BlobID)
 		r, err := session.Download(ctx, email.BlobID)
 		if err != nil {
 			return cmdErrorf(1, "Failed downloading message %v (blob %v): %v", email.ID, email.BlobID, err)
@@ -151,13 +157,14 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			return cmdErrorf(1, "Failed delivering message %v: %v", email.ID, err)
 		}
 
+		fmt.Printf("["+countFmt+"/"+countFmt+"] %v -> %v (%v bytes)\n",
+			emailIdx, totalEmails, email.ID, filepath.Base(p), email.Size)
+		vlog.Logf(ctx, "Delivered %v to %v", email.ID, p)
+
 		// Record the ID so we don't download it again next time.
 		if err := db.addLastSyncID(email.ID); err != nil {
 			return cmdErrorf(1, "Failed recording synced ID: %v", err)
 		}
-
-		fmt.Printf("["+countFmt+"/"+countFmt+"] %v -> %v (%v bytes)\n",
-			emailIdx, totalEmails, email.ID, filepath.Base(p), email.Size)
 	}
 	if err := <-errChan; err != nil {
 		return cmdErrorf(1, "Failed querying for messages: %v", err)
