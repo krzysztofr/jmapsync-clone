@@ -50,6 +50,42 @@ func TestSync_Basic(t *testing.T) {
 	verifyMaildir(t, cfg.maildir, emails)
 }
 
+func TestSync_QueryError(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := syncConfig{
+		dbPath:        filepath.Join(t.TempDir(), "state.db"),
+		maildir:       filepath.Join(t.TempDir(), "mail"),
+		stdout:        &stdout,
+		queryChanSize: 1,
+	}
+	session := newTestSession()
+
+	// Do a no-op sync to set the last sync time.
+	doTestSync(t, cfg, session, date("2024-11-02 14:00:00"))
+
+	// Add 10 emails, but make the query fail after the first 3 are returned.
+	emails := session.addEmails(1, 10, date("2024-11-02 14:15:00"), time.Minute)
+	session.errAfter = 3
+	cfg.startTime = date("2024-11-02 15:00:00")
+	if cmdErr := sync(context.Background(), cfg, session); cmdErr == nil {
+		t.Fatalf("Sync succeeded despite query error")
+	}
+	verifyMaildir(t, cfg.maildir, emails[:3])
+
+	// Do another sync that gets a few more messages.
+	session.errAfter = 6
+	cfg.startTime = date("2024-11-02 15:00:20")
+	if cmdErr := sync(context.Background(), cfg, session); cmdErr == nil {
+		t.Fatalf("Sync succeeded despite query error")
+	}
+	verifyMaildir(t, cfg.maildir, emails[:6])
+
+	// Do a successful sync a day later to get the rest of the messages.
+	session.errAfter = 0
+	doTestSync(t, cfg, session, date("2024-11-03 15:00:00"))
+	verifyMaildir(t, cfg.maildir, emails)
+}
+
 // date parses a time in "YYYY-MM-DD HH:MM:SS" format.
 func date(s string) time.Time {
 	tm, err := time.Parse(time.DateTime, s)
@@ -73,6 +109,8 @@ type testSession struct {
 	emails    map[string]jmap.Email          // ID -> email
 	blobs     map[string]string              // BlobID -> ID
 	mailboxes map[string]map[string]struct{} // mailbox name -> set of email IDs
+
+	errAfter int // if non-zero, report error after sending this many query results
 }
 
 func newTestSession() *testSession {
@@ -130,11 +168,15 @@ func (s *testSession) Query(ctx context.Context, cfg jmap.QueryConfig, ch chan<-
 		}
 		emails = append(emails, email)
 	}
+	sort.Slice(emails, func(i, j int) bool { return emails[i].ReceivedAt.Before(emails[j].ReceivedAt) })
 	if cfg.TotalEmailsOut != nil {
 		*cfg.TotalEmailsOut = uint64(len(emails))
 	}
-	for _, email := range emails {
+	for i, email := range emails {
 		ch <- email
+		if i+1 == s.errAfter {
+			return errors.New("intentional failure")
+		}
 	}
 	return nil
 }

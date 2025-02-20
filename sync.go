@@ -22,22 +22,23 @@ const (
 	// requesting messages. I'm doing this speculatively to reduce the chances of missed
 	// messages if the server doesn't make delivered messages immediately available via JMAP.
 	syncOverlapDur = time.Hour
-	// queryChanSize is the size for the buffered channel used to return query results.
-	queryChanSize = 100
+	// defaultQueryChanSize is the size for the buffered channel used to return query results.
+	defaultQueryChanSize = 100
 	// emailAddressWidth is the default width for email addresses which listing messages.
 	emailAddressWidth = 20
 )
 
 // syncConfig configures sync's behavior.
 type syncConfig struct {
-	dbPath      string    // path to stateDB SQLite file
-	maildir     string    // path to destination maildir
-	minTime     time.Time // min receivedAt time (inclusive)
-	maxTime     time.Time // max receivedAt time (exclusive)
-	mailboxName string    // mailbox to sync; empty for all
-	startTime   time.Time // time when sync started
-	list        bool      // list messages instead of downloading them
-	stdout      io.Writer // write progress here instead of stdout if non-nil
+	dbPath        string    // path to stateDB SQLite file
+	maildir       string    // path to destination maildir
+	minTime       time.Time // min receivedAt time (inclusive)
+	maxTime       time.Time // max receivedAt time (exclusive)
+	mailboxName   string    // mailbox to sync; empty for all
+	startTime     time.Time // time when sync started
+	list          bool      // list messages instead of downloading them
+	stdout        io.Writer // write progress here instead of stdout if non-nil
+	queryChanSize int       // size for query result channel, 0 for default
 }
 
 // sync uses session to sync messages per cfg.
@@ -103,7 +104,11 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	}
 
 	// Start querying for messages asynchronously.
-	emailChan := make(chan jmap.Email, queryChanSize)
+	chanSize := cfg.queryChanSize
+	if chanSize == 0 {
+		chanSize = defaultQueryChanSize
+	}
+	emailChan := make(chan jmap.Email, chanSize)
 	errChan := make(chan error, 1)
 	go func() {
 		if err := session.Query(ctx, qcfg, emailChan); err != nil {
@@ -117,11 +122,6 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	var countFmt string
 	newIDs := make(map[string]struct{})
 	for email := range emailChan {
-		// If the query failed, don't bother downloading messages.
-		if len(errChan) != 0 {
-			break
-		}
-
 		emailIdx++
 
 		// Make sure we don't handle the message again if we saw it earlier due to
