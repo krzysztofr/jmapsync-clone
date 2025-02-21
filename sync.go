@@ -128,7 +128,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 		// batching weirdness -- I didn't see anything in the RFCs about query cursors,
 		// so I'm worried the results could change while we're fetching them.
 		if setContains(newIDs, email.ID) {
-			// TODO: Log something here?
+			vlog.Logf(ctx, "Skipping %v (already saw during this sync)", email.ID)
 			continue
 		}
 		newIDs[email.ID] = struct{}{}
@@ -149,6 +149,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 
 		// Don't download the message again if we already got it last time.
 		if setContains(oldIDs, email.ID) {
+			vlog.Logf(ctx, "Skipping %v (synced previously)", email.ID)
 			fmt.Fprintf(stdout, "["+countFmt+"/"+countFmt+"] %v    (already seen)\n",
 				emailIdx, totalEmails, email.ID)
 			continue
