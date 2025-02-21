@@ -49,4 +49,12 @@ Incrementally download email messages from a JMAP server.
 ```
 
 If you're using Fastmail, you can create an API token for read-only JMAP access
-at <https://app.fastmail.com/settings/security/tokens>.
+at <https://app.fastmail.com/settings/security/tokens>. Add a line to
+`$HOME/.netrc` similar to the following:
+
+```
+machine api.fastmail.com login jmap password <api-token>
+```
+
+`jmapsync` just looks for a `machine` entry matching the hostname from
+`-session-url`; the `login` value is not currently used.
