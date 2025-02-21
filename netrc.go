@@ -6,8 +6,10 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
+	"strings"
 )
 
 // readNetrcMachine returns the .netrc entry for the specified machine name.
@@ -21,29 +23,33 @@ func readNetrcMachine(p string, machine string) (*netrcMachine, error) {
 		return nil, err
 	}
 
-	tokens := netrcSpaceRegexp.Split(string(bytes.TrimSpace(b)), -1)
+	var tokens, spaces []string // tokens and whitespace following each token
+	text := string(bytes.TrimSpace(b))
+	parts := netrcNonspaceRegexp.FindAllStringIndex(text, -1)
+	for i, part := range parts {
+		tokens = append(tokens, text[part[0]:part[1]])
+		if i < len(parts)-1 {
+			spaces = append(spaces, text[part[1]:parts[i+1][0]])
+		} else {
+			spaces = append(spaces, "\n\n")
+		}
+	}
 
 	var tokenIdx int
-	readToken := func() (string, bool) {
+	readToken := func() (token, whitespace string, ok bool) {
 		if tokenIdx >= len(tokens) {
-			return "", false
+			return "", "", false
 		}
-		token := tokens[tokenIdx]
-		tokenIdx++
-		return token, true
+		defer func() { tokenIdx++ }()
+		return tokens[tokenIdx], spaces[tokenIdx], true
 	}
 
 	var cur *netrcMachine
 
 	for {
-		token, ok := readToken()
+		token, _, ok := readToken()
 		if !ok {
 			break
-		}
-
-		if token == "macdef" {
-			// TODO: Ought to skip ahead to the next double newline here.
-			return nil, errors.New("macdef unsupported")
 		}
 
 		// End the current machine (if any) and start a new one.
@@ -55,22 +61,39 @@ func readNetrcMachine(p string, machine string) (*netrcMachine, error) {
 		} else if cur == nil {
 			return nil, errors.New("not in machine")
 		}
+
 		switch token {
 		case "machine":
-			cur.machine, ok = readToken()
+			cur.machine, _, ok = readToken()
 		case "default":
 			// Don't consume another token.
 		case "login":
-			cur.login, ok = readToken()
+			cur.login, _, ok = readToken()
 		case "password":
-			cur.password, ok = readToken()
+			cur.password, _, ok = readToken()
 		case "account":
-			cur.account, ok = readToken()
+			cur.account, _, ok = readToken()
+		case "macdef":
+			// This is FTP garbage that probably nobody uses.
+			// It defines a macro with a specified name followed by random
+			// data up to the next "null line" (consecutive newlines).
+			var ws string
+			if _, ws, ok = readToken(); !ok {
+				break
+			} else if !strings.Contains(ws, "\n") {
+				return nil, errors.New("macdef must be followed by newline")
+			}
+			// Consume tokens until we find one followed by a newline.
+			for {
+				if _, ws, ok = readToken(); !ok || strings.Contains(ws, "\n\n") {
+					break
+				}
+			}
 		default:
-			return nil, errors.New("invalid token")
+			return nil, fmt.Errorf("invalid token %q", token)
 		}
 		if !ok {
-			return nil, errors.New("ran out of tokens")
+			return nil, fmt.Errorf("ran out of tokens in %q", token)
 		}
 	}
 	if cur != nil && cur.machine == machine {
@@ -79,6 +102,7 @@ func readNetrcMachine(p string, machine string) (*netrcMachine, error) {
 	return nil, nil
 }
 
+// netrcMachine describes a "machine" or "default" entry in a .netrc file.
 type netrcMachine struct {
 	machine  string
 	login    string
@@ -86,4 +110,4 @@ type netrcMachine struct {
 	account  string
 }
 
-var netrcSpaceRegexp = regexp.MustCompile(`[ \t\n]+`)
+var netrcNonspaceRegexp = regexp.MustCompile(`[^ \t\n]+`)
