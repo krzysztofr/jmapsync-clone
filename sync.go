@@ -55,7 +55,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	var mdir *maildir.Maildir
 	var db *stateDB
 
-	vlog.Log(ctx, "Starting sync")
+	vlog.Log(ctx, "Starting sync at ", formatTime(cfg.startTime))
 
 	stdout := cfg.stdout
 	if stdout == nil {
@@ -83,10 +83,10 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			if qcfg.After, err = db.getLastSyncStart(); err != nil {
 				return cmdErrorf(1, "Failed getting last sync time: %v", err)
 			}
-			vlog.Log(ctx, "Last sync started at ", qcfg.After)
+			vlog.Log(ctx, "Last sync started at ", formatTime(qcfg.After))
 			if !qcfg.After.IsZero() {
 				qcfg.After = qcfg.After.Add(-syncOverlapDur)
-				vlog.Log(ctx, "Will request messages received after ", qcfg.After)
+				vlog.Log(ctx, "Will request messages received after ", formatTime(qcfg.After))
 			}
 		}
 
@@ -182,7 +182,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	if !cfg.list {
 		// Only update last-sync-related state if a max time wasn't set.
 		if cfg.maxTime.IsZero() {
-			vlog.Logf(ctx, "Setting last sync time to %v", cfg.startTime)
+			vlog.Log(ctx, "Setting last sync time to ", formatTime(cfg.startTime))
 			if err := db.setLastSyncStart(cfg.startTime); err != nil {
 				return cmdErrorf(1, "Failed updating last sync time: %v", err)
 			}
@@ -248,4 +248,9 @@ func truncate(orig string, max int, elide bool) string {
 		return string(runes[:max-1]) + "…"
 	}
 	return string(runes[:max])
+}
+
+// formatTime formats t as an RFC 3339 local time.
+func formatTime(t time.Time) string {
+	return t.Local().Format(time.RFC3339)
 }
