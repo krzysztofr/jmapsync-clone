@@ -27,7 +27,7 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.StringVar(&cfg.dbPath, "db", filepath.Join(os.Getenv("HOME"), ".jmapsync.db"), "SQLite database for storing last sync state")
-	flag.StringVar(&cfg.maildir, "maildir", "", "Destination maildir directory (created if it doesn't exist)")
+	flag.StringVar(&cfg.maildir, "maildir", "", "Destination Maildir directory (created if it doesn't exist)")
 	flag.StringVar(&cfg.mailboxName, "mailbox", "", "Name of mailbox to sync (empty to sync all messages)")
 	flag.BoolVar(&cfg.list, "list", false, "List all matching messages instead of syncing them")
 	flag.Var((*timeValue)(&cfg.minTime), "min-time", "Minimum received-at RFC 3339 time (inclusive, empty to get all since last sync)")

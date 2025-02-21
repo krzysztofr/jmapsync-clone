@@ -293,14 +293,14 @@ func (s *testSession) Download(ctx context.Context, blobID string) (io.ReadClose
 }
 
 // verifyMaildir verifies that dir contains exactly the supplied emails.
-// Each file in the maildir must contain the corresponding message's BlobID.
+// Each file in dir must contain the corresponding message's BlobID.
 func verifyMaildir(t *testing.T, dir string, emails []jmap.Email) {
 	t.Helper()
 
 	newDir := filepath.Join(dir, "new")
 	entries, err := os.ReadDir(newDir)
 	if err != nil {
-		t.Fatal("Failed reading maildir:", err)
+		t.Fatal("Failed reading Maildir:", err)
 	}
 	maildirIDs := make(map[string]struct{}, len(entries))
 	dupeIDs := make(map[string]struct{})

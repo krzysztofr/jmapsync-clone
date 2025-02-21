@@ -31,7 +31,7 @@ const (
 // syncConfig configures sync's behavior.
 type syncConfig struct {
 	dbPath        string    // path to stateDB SQLite file
-	maildir       string    // path to destination maildir
+	maildir       string    // path to destination Maildir directory
 	minTime       time.Time // min receivedAt time (inclusive)
 	maxTime       time.Time // max receivedAt time (exclusive)
 	mailboxName   string    // mailbox to sync; empty for all
@@ -64,7 +64,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 
 	if !cfg.list {
 		if cfg.maildir == "" {
-			return cmdErrorf(2, "No destination maildir specified")
+			return cmdErrorf(2, "No destination Maildir directory specified")
 		}
 
 		var err error

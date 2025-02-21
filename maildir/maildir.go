@@ -1,9 +1,10 @@
 // Copyright 2025 Daniel Erat.
 // All rights reserved.
 
-// Package maildir delivers email messages to a maildir.
+// Package maildir delivers email messages to a Maildir directory.
 //
 //	https://cr.yp.to/proto/maildir.html
+//	https://en.wikipedia.org/wiki/Maildir
 package maildir
 
 import (
@@ -19,12 +20,12 @@ import (
 // num is a monotonically-increasing delivery counter.
 var num atomic.Uint64
 
-// Maildir delivers messages to a maildir.
+// Maildir delivers messages to a Maildir directory.
 type Maildir struct {
 	dir string // base directory
 }
 
-// New creates a maildir at dir if it doesn't already exist.
+// New creates a Maildir directory at dir if it doesn't already exist.
 func New(dir string) (*Maildir, error) {
 	for _, p := range []string{
 		dir,
