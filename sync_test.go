@@ -21,7 +21,7 @@ import (
 )
 
 func TestSync_Basic(t *testing.T) {
-	cfg := makeTestConfig(t)
+	cfg, _ := makeTestConfig(t)
 	session := newTestSession()
 
 	// Add 10 messages and sync them.
@@ -50,7 +50,7 @@ func TestSync_Basic(t *testing.T) {
 }
 
 func TestSync_QueryError(t *testing.T) {
-	cfg := makeTestConfig(t)
+	cfg, _ := makeTestConfig(t)
 	session := newTestSession()
 
 	// Do a no-op sync to set the last sync time.
@@ -74,7 +74,7 @@ func TestSync_QueryError(t *testing.T) {
 }
 
 func TestSync_DownloadError(t *testing.T) {
-	cfg := makeTestConfig(t)
+	cfg, _ := makeTestConfig(t)
 	session := newTestSession()
 
 	// Do a no-op sync to set the last sync time.
@@ -93,7 +93,7 @@ func TestSync_DownloadError(t *testing.T) {
 }
 
 func TestSync_TimeFilter(t *testing.T) {
-	cfg := makeTestConfig(t)
+	cfg, _ := makeTestConfig(t)
 	session := newTestSession()
 
 	// Add 10 emails, but pass a min time such that only the last 5 are downloaded.
@@ -128,7 +128,7 @@ func TestSync_TimeFilter(t *testing.T) {
 }
 
 func TestSync_MailboxFilter(t *testing.T) {
-	cfg := makeTestConfig(t)
+	cfg, _ := makeTestConfig(t)
 	session := newTestSession()
 
 	// Add 5 messages in the "Inbox" mailbox and 5 more in "Sent".
@@ -139,19 +139,53 @@ func TestSync_MailboxFilter(t *testing.T) {
 	verifyMaildir(t, cfg.maildir, emails)
 }
 
-// makeTestConfig returns a new base syncConfig for a test to use.
-func makeTestConfig(t *testing.T) syncConfig {
-	return syncConfig{
-		dbPath:        filepath.Join(t.TempDir(), "state.db"),
-		maildir:       filepath.Join(t.TempDir(), "mail"),
-		stdout:        &bytes.Buffer{},
-		queryChanSize: 1,
+func TestSync_List(t *testing.T) {
+	cfg, stdout := makeTestConfig(t)
+	cfg.list = true
+	session := newTestSession()
+
+	session.addEmails(1, 5, dateLocal("2024-11-02 14:00:00"), time.Minute)
+	doTestSync(t, cfg, session, dateLocal("2024-11-02 14:10:00"), true)
+	if _, err := os.Stat(cfg.maildir); err == nil {
+		t.Errorf("Maildir %v incorrectly created when listing", cfg.maildir)
+	}
+
+	// go-cmp's diff output for strings is atrocious. :-(
+	want := strings.TrimLeft(`
+M01  2024-11-02 14:00:00  01@example.org        Message 01
+M02  2024-11-02 14:01:00  02@example.org        Message 02
+M03  2024-11-02 14:02:00  03@example.org        Message 03
+M04  2024-11-02 14:03:00  04@example.org        Message 04
+M05  2024-11-02 14:04:00  05@example.org        Message 05
+`, "\n")
+	if got := stdout.String(); want != got {
+		t.Error("Bad stdout:\nWant:\n" + want + "\nGot:\n" + got)
 	}
 }
 
-// date parses a time in "YYYY-MM-DD HH:MM:SS" format.
+// makeTestConfig returns a new base syncConfig for a test to use.
+func makeTestConfig(t *testing.T) (syncConfig, *bytes.Buffer) {
+	var stdout bytes.Buffer
+	return syncConfig{
+		dbPath:        filepath.Join(t.TempDir(), "state.db"),
+		maildir:       filepath.Join(t.TempDir(), "mail"),
+		stdout:        &stdout,
+		queryChanSize: 1,
+	}, &stdout
+}
+
+// date parses a UTC time in "YYYY-MM-DD HH:MM:SS" format.
 func date(s string) time.Time {
 	tm, err := time.Parse(time.DateTime, s)
+	if err != nil {
+		panic(fmt.Sprint("Invalid time: ", err))
+	}
+	return tm
+}
+
+// dateLocal parses a local time in "YYYY-MM-DD HH:MM:SS" format.
+func dateLocal(s string) time.Time {
+	tm, err := time.ParseInLocation(time.DateTime, s, time.Local)
 	if err != nil {
 		panic(fmt.Sprint("Invalid time: ", err))
 	}

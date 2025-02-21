@@ -80,14 +80,14 @@ type Email struct {
 	ID string `json:"id"`
 	// BlobID uniquely identifies the message's content.
 	BlobID string `json:"blobId"`
+	// Size contains the message's raw data size in octets.
+	Size uint64 `json:"size"`
+	// ReceivedAt is the time the message was received by the server.
+	ReceivedAt time.Time `json:"receivedAt"`
 	// From contains the message's sender.
 	From []EmailAddress `json:"from"`
 	// Subject contains the message's subject.
 	Subject string `json:"subject"`
-	// ReceivedAt is the time the message was received by the server.
-	ReceivedAt time.Time `json:"receivedAt"`
-	// Size contains the message's raw data size in octets.
-	Size uint64 `json:"size"`
 }
 
 // EmailAddress describes an email address in a message header.
@@ -108,6 +108,8 @@ type QueryConfig struct {
 	MailboxName string
 	// TotalEmailsOut is set (if non-nil) to the total number of messages before any writes to ch occur.
 	TotalEmailsOut *uint64
+	// GetDetails controls whether the ReceivedAt, From, and Subject fields are fetched.
+	GetDetails bool
 }
 
 // Query fetches information about messages.
@@ -151,6 +153,11 @@ func (s *Session) Query(ctx context.Context, cfg QueryConfig, ch chan<- Email) e
 			queryArgs["filter"] = filter
 		}
 
+		props := []string{"blobId", "size"}
+		if cfg.GetDetails {
+			props = append(props, "receivedAt", "from", "subject")
+		}
+
 		vlog.Logf(ctx, "Sending request for position %v with filter %v", pos, filter)
 		res, err := s.sendJMAPRequest(
 			ctx,
@@ -168,8 +175,7 @@ func (s *Session) Query(ctx context.Context, cfg QueryConfig, ch chan<- Email) e
 						"path":     "/ids/*",
 						"resultOf": "0",
 					},
-					// TODO: Maybe make it configurable whether from/subject/etc. are fetched.
-					"properties": []string{"blobId", "receivedAt", "size", "from", "subject"},
+					"properties": props,
 				},
 				ID: "1",
 			},
@@ -319,7 +325,7 @@ func (s *Session) sendJMAPRequest(ctx context.Context, methodCalls ...invocation
 			return &jres, fmt.Errorf("method call and response IDs differ (%q vs. %q)", id1, id2)
 		}
 		if mr := jres.MethodResponses[i]; mr.Name == "error" {
-			// TODO: Get the "type" field for more details per RFC 8620 3.6.2.
+			// Get the "type" field for more details per RFC 8620 3.6.2.
 			errType, _ := mr.Args["type"]
 			return &jres, fmt.Errorf("method call %v failed: %v", mr.ID, errType)
 		}

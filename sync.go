@@ -49,6 +49,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 		Before:         cfg.maxTime,
 		MailboxName:    cfg.mailboxName,
 		TotalEmailsOut: &totalEmails,
+		GetDetails:     cfg.list,
 	}
 	oldIDs := make(map[string]struct{})
 	var mdir *maildir.Maildir
@@ -89,7 +90,6 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			}
 		}
 
-		// TODO: Skip some or all of this last-sync stuff when minTime and/or maxTime were passed?
 		if ids, err := db.getLastSyncIDs(); err != nil {
 			return cmdErrorf(1, "Failed getting last sync IDs: %v", err)
 		} else {
@@ -138,7 +138,8 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			if len(email.From) > 0 {
 				from = truncate(email.From[0].Email, emailAddressWidth, true /* elide */)
 			}
-			fmt.Fprintf(stdout, "%v  %-"+strconv.Itoa(emailAddressWidth)+"s  %v\n", email.ID, from, email.Subject)
+			fmt.Fprintf(stdout, "%v  %v  %-"+strconv.Itoa(emailAddressWidth)+"s  %v\n",
+				email.ID, email.ReceivedAt.Local().Format(time.DateTime), from, email.Subject)
 			continue
 		}
 
