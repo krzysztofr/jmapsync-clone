@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"codeberg.org/derat/jmapsync/jmap"
+	"codeberg.org/derat/jmapsync/netrc"
 	"codeberg.org/derat/jmapsync/vlog"
 )
 
@@ -49,7 +50,7 @@ func main() {
 			return 2
 		}
 		netrcPath := filepath.Join(os.Getenv("HOME"), ".netrc")
-		machine, err := readNetrcMachine(netrcPath, u.Hostname())
+		machine, err := netrc.ReadMachine(netrcPath, u.Hostname())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed reading %v: %v\n", netrcPath, err)
 			return 2
@@ -74,7 +75,7 @@ func main() {
 		}
 
 		// Start the session.
-		session, err := jmap.NewSession(ctx, *sessionURL, machine.password)
+		session, err := jmap.NewSession(ctx, *sessionURL, machine.Password)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed getting session from %v: %v\n", *sessionURL, err)
 			return 1
