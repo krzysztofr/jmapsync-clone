@@ -1,6 +1,7 @@
 // Copyright 2025 Daniel Erat.
 // All rights reserved.
 
+// Package vlog writes messages to a logger attached to a context.
 package vlog
 
 import (

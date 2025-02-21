@@ -3,7 +3,7 @@
 
 // Package maildir delivers email messages to a maildir.
 //
-// See https://cr.yp.to/proto/maildir.html for more details.
+//	https://cr.yp.to/proto/maildir.html
 package maildir
 
 import (
