@@ -23,7 +23,7 @@ func main() {
 
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %v [flag]...\n"+
-			"Download email messages from a JMAP server.\n\n", os.Args[0])
+			"Incrementally download email messages from a JMAP server.\n\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.StringVar(&cfg.dbPath, "db", filepath.Join(os.Getenv("HOME"), ".jmapsync.db"), "SQLite database for storing last sync state")
@@ -33,12 +33,19 @@ func main() {
 	flag.Var((*timeValue)(&cfg.minTime), "min-time", "Minimum received-at RFC 3339 time (inclusive, empty to get all since last sync)")
 	flag.Var((*timeValue)(&cfg.maxTime), "max-time", "Maximum received-at RFC 3339 time (exclusive, empty for no limit)")
 	logPath := flag.String("log-file", "", "Path to file where verbose logs will be written")
+	netrcPath := flag.String("netrc-file", filepath.Join(os.Getenv("HOME"), ".netrc"), "Path to .netrc file containing auth token")
 	sessionURL := flag.String("session-url", "https://api.fastmail.com/jmap/session", "JMAP Session resource URL")
 	flag.Parse()
 
 	rv := func() int {
 		if flag.NArg() != 0 {
-			fmt.Fprintln(os.Stderr, "Positional arguments unsupported")
+			fmt.Fprint(os.Stderr, "Positional arguments unsupported.\n\n")
+			flag.Usage()
+			return 2
+		}
+
+		if (cfg.maildir != "") == cfg.list {
+			fmt.Fprint(os.Stderr, "Either -maildir or -list must be specified.\n\n")
 			flag.Usage()
 			return 2
 		}
@@ -49,13 +56,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Bad JMAP Session resource URL %q: %v\n", *sessionURL, err)
 			return 2
 		}
-		netrcPath := filepath.Join(os.Getenv("HOME"), ".netrc")
-		machine, err := netrc.ReadMachine(netrcPath, u.Hostname())
+		machine, err := netrc.ReadMachine(*netrcPath, u.Hostname())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed reading %v: %v\n", netrcPath, err)
+			fmt.Fprintf(os.Stderr, "Failed reading %v: %v\n", *netrcPath, err)
 			return 2
 		} else if machine == nil {
-			fmt.Fprintf(os.Stderr, "Didn't find machine %q in %v\n", u.Hostname(), netrcPath)
+			fmt.Fprintf(os.Stderr, "Didn't find machine %q in %v\n", u.Hostname(), *netrcPath)
 			return 2
 		}
 
