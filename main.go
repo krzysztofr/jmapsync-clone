@@ -29,6 +29,7 @@ func main() {
 	flag.StringVar(&cfg.dbPath, "db", filepath.Join(os.Getenv("HOME"), ".jmapsync.db"), "SQLite database for storing last sync state")
 	flag.StringVar(&cfg.maildir, "maildir", "", "Destination Maildir directory (created if it doesn't exist)")
 	flag.StringVar(&cfg.mailboxName, "mailbox", "", "Name of mailbox to sync (empty to sync all messages)")
+	flag.Var((*repeatedFlag)(&cfg.notOnlyMailboxNames), "not-only-mailbox", "Don't sync messages only in these mailboxes (can be repeated)")
 	flag.BoolVar(&cfg.list, "list", false, "List all matching messages instead of syncing them")
 	flag.Var((*timeValue)(&cfg.minTime), "min-time", "Minimum received-at RFC 3339 time (inclusive, empty to get all since last sync)")
 	flag.Var((*timeValue)(&cfg.maxTime), "max-time", "Maximum received-at RFC 3339 time (exclusive, empty for no limit)")
@@ -98,25 +99,4 @@ func main() {
 		return 0
 	}()
 	os.Exit(rv)
-}
-
-// timeValue implements the flag.Value interface for parsing an RFC 3339 datetime into a time.Time.
-type timeValue time.Time
-
-func (v *timeValue) String() string {
-	if time.Time(*v).IsZero() {
-		return ""
-	}
-	return time.Time(*v).Format(time.RFC3339)
-}
-
-func (v *timeValue) Set(s string) error {
-	if s == "" {
-		*v = timeValue(time.Time{})
-		return nil
-	}
-	var err error
-	tm, err := time.Parse(time.RFC3339, s)
-	*v = timeValue(tm)
-	return err
 }

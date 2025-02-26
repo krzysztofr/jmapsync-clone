@@ -6,8 +6,6 @@ This is a command-line program that incrementally downloads email messages via
 the [JMAP] protocol (e.g. from [Fastmail]) and writes them to a [Maildir]
 directory.
 
-It's still a work in progress.
-
 [JMAP]: https://jmap.io/
 [Fastmail]: https://www.fastmail.com/
 [Maildir]: https://en.wikipedia.org/wiki/Maildir
@@ -44,6 +42,8 @@ Incrementally download email messages from a JMAP server.
     	Minimum received-at RFC 3339 time (inclusive, empty to get all since last sync)
   -netrc-file string
     	Path to .netrc file containing auth token (default "$HOME/.netrc")
+  -not-only-mailbox value
+    	Don't sync messages only in these mailboxes (can be repeated)
   -session-url string
     	JMAP Session resource URL (default "https://api.fastmail.com/jmap/session")
 ```
@@ -58,3 +58,13 @@ machine api.fastmail.com login jmap password <api-token>
 
 `jmapsync` just looks for a `machine` entry matching the hostname from
 `-session-url`; the `login` value is not currently used.
+
+A command to sync all new non-spam/trashed messages from Fastmail might look
+like the following:
+
+```
+jmapsync \
+  -maildir /path/to/maildir \
+  -not-only-mailbox Spam \
+  -not-only-mailbox Trash
+```

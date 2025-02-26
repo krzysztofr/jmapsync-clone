@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -106,6 +107,9 @@ type QueryConfig struct {
 	Before time.Time
 	// MailboxName is the name of a mailbox that messages must be in, e.g. "Inbox" or "Sent".
 	MailboxName string
+	// NotOnlyMailboxNames indicates that messages must be in at least one mailbox other than these.
+	// Common values are "Trash" and "Spam".
+	NotOnlyMailboxNames []string
 	// TotalEmailsOut is set (if non-nil) to the total number of messages before any writes to ch occur.
 	TotalEmailsOut *uint64
 	// GetDetails controls whether the ReceivedAt, From, and Subject fields are fetched.
@@ -117,13 +121,23 @@ type QueryConfig struct {
 func (s *Session) Query(ctx context.Context, cfg QueryConfig, ch chan<- Email) error {
 	defer close(ch)
 
-	var mailboxID string
+	// Look up mailbox IDs.
+	mailboxIDs := make(map[string]string) // names to IDs
 	if cfg.MailboxName != "" {
-		var err error
-		if mailboxID, err = s.getMailboxID(ctx, cfg.MailboxName); err != nil {
-			return fmt.Errorf("get mailbox ID: %w", err)
+		mailboxIDs[cfg.MailboxName] = ""
+	}
+	for _, name := range cfg.NotOnlyMailboxNames {
+		mailboxIDs[name] = ""
+	}
+	if len(mailboxIDs) > 0 {
+		// TODO: Look up multiple mailboxes in a single query.
+		for name := range mailboxIDs {
+			var err error
+			if mailboxIDs[name], err = s.getMailboxID(ctx, name); err != nil {
+				return fmt.Errorf("mailbox %q: %w", name, err)
+			}
+			vlog.Logf(ctx, "Mailbox %q has ID %v", name, mailboxIDs[name])
 		}
-		vlog.Logf(ctx, "Mailbox %q has ID %v", cfg.MailboxName, mailboxID)
 	}
 
 	var pos uint64
@@ -146,8 +160,15 @@ func (s *Session) Query(ctx context.Context, cfg QueryConfig, ch chan<- Email) e
 		if !cfg.Before.IsZero() {
 			filter["before"] = cfg.Before.UTC().Format(time.RFC3339)
 		}
-		if mailboxID != "" {
-			filter["inMailbox"] = mailboxID
+		if cfg.MailboxName != "" {
+			filter["inMailbox"] = mailboxIDs[cfg.MailboxName]
+		}
+		if len(cfg.NotOnlyMailboxNames) > 0 {
+			ids := make([]string, len(cfg.NotOnlyMailboxNames))
+			for i, name := range cfg.NotOnlyMailboxNames {
+				ids[i] = mailboxIDs[name]
+			}
+			filter["inMailboxOtherThan"] = ids
 		}
 		if len(filter) > 0 {
 			queryArgs["filter"] = filter
@@ -240,6 +261,8 @@ func (s *Session) getMailboxID(ctx context.Context, name string) (string, error)
 		return "", err
 	} else if len(ids) != 1 {
 		return "", fmt.Errorf("got %v IDs; want 1", len(ids))
+	} else if ids[0] == "" {
+		return "", errors.New("got empty ID")
 	}
 	return ids[0], nil
 }

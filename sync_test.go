@@ -34,17 +34,17 @@ func TestSync_Basic(t *testing.T) {
 	verifyMaildir(t, cfg.maildir, emails)
 
 	// Add 5 more messages and sync them.
-	emails = append(emails, session.addEmails(11, 5, date("2024-11-02 15:15:00"), time.Minute)...)
+	emails = append(emails, session.addEmails(11, 15, date("2024-11-02 15:15:00"), time.Minute)...)
 	doTestSync(t, cfg, session, date("2024-11-02 15:25:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 
 	// Add 5 more messages, wait a few days, and sync.
-	emails = append(emails, session.addEmails(15, 5, date("2024-11-02 15:30:00"), time.Minute)...)
+	emails = append(emails, session.addEmails(16, 20, date("2024-11-02 15:30:00"), time.Minute)...)
 	doTestSync(t, cfg, session, date("2024-11-06 00:00:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 
 	// Add 5 old emails to the server and check that they aren't downloaded.
-	session.addEmails(20, 5, date("2023-11-02 00:00:00"), time.Minute)
+	session.addEmails(21, 25, date("2023-11-02 00:00:00"), time.Minute)
 	doTestSync(t, cfg, session, date("2024-11-06 00:05:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 }
@@ -119,8 +119,8 @@ func TestSync_TimeFilter(t *testing.T) {
 
 	// Add some old and new messages and clear the min and max times.
 	// We should get the new messages but not the old ones.
-	session.addEmails(10, 5, date("2024-11-02 14:20:00"), time.Minute)
-	emails = append(emails, session.addEmails(15, 5, date("2024-11-03 14:15:00"), time.Minute)...)
+	session.addEmails(11, 15, date("2024-11-02 14:20:00"), time.Minute)
+	emails = append(emails, session.addEmails(16, 20, date("2024-11-03 14:15:00"), time.Minute)...)
 	cfg.minTime = time.Time{}
 	cfg.maxTime = time.Time{}
 	doTestSync(t, cfg, session, date("2024-11-03 14:12:00"), true)
@@ -131,10 +131,27 @@ func TestSync_MailboxFilter(t *testing.T) {
 	cfg, _ := makeTestConfig(t)
 	session := newTestSession()
 
-	// Add 5 messages in the "Inbox" mailbox and 5 more in "Sent".
+	// Add 5 messages in the Inbox mailbox and 5 more in Sent.
 	emails := session.addEmails(1, 5, date("2024-11-02 14:00:00"), time.Minute, "Inbox")
-	session.addEmails(5, 10, date("2024-11-02 14:05:00"), time.Minute, "Sent")
+	session.addEmails(6, 10, date("2024-11-02 14:05:00"), time.Minute, "Sent")
 	cfg.mailboxName = "Inbox"
+	doTestSync(t, cfg, session, date("2024-11-03 14:15:00"), true)
+	verifyMaildir(t, cfg.maildir, emails)
+}
+
+func TestSync_NotOnlyMailboxFilter(t *testing.T) {
+	cfg, _ := makeTestConfig(t)
+	session := newTestSession()
+
+	// Add 5 messages in the Sent mailbox, 3 in both Sent and Trash, and a few only in Trash and/or Spam.
+	emails := session.addEmails(1, 5, date("2024-11-02 14:00:00"), time.Minute, "Sent")
+	emails = append(emails, session.addEmails(6, 8, date("2024-11-02 14:00:00"), time.Minute, "Sent", "Trash")...)
+	session.addEmails(9, 9, date("2024-11-02 14:00:00"), time.Minute, "Trash")
+	session.addEmails(10, 10, date("2024-11-02 14:00:00"), time.Minute, "Spam")
+	session.addEmails(11, 11, date("2024-11-02 14:00:00"), time.Minute, "Trash", "Spam")
+
+	cfg.mailboxName = "Sent"
+	cfg.notOnlyMailboxNames = []string{"Spam", "Trash"}
 	doTestSync(t, cfg, session, date("2024-11-03 14:15:00"), true)
 	verifyMaildir(t, cfg.maildir, emails)
 }
@@ -236,12 +253,14 @@ func (s *testSession) addEmail(email jmap.Email, mailboxes ...string) {
 	}
 }
 
-// addEmails adds n emails received step apart with IDs starting at base.
+// addEmails adds emails received step apart with IDs in the range [first, last].
 // The emails are returned.
-func (s *testSession) addEmails(base, n int, start time.Time, step time.Duration, mailboxes ...string) []jmap.Email {
+func (s *testSession) addEmails(first, last int, start time.Time, step time.Duration, mailboxes ...string) []jmap.Email {
+	if first > last {
+		panic(fmt.Sprintf("Invalid ID range [%v, %v]", first, last))
+	}
 	var emails []jmap.Email
-	for i := range n {
-		id := base + i
+	for id := first; id <= last; id++ {
 		idStr := fmt.Sprintf("%02d", id)
 		blobID := "B" + idStr
 		email := jmap.Email{
@@ -249,7 +268,7 @@ func (s *testSession) addEmails(base, n int, start time.Time, step time.Duration
 			BlobID:     blobID,
 			From:       []jmap.EmailAddress{{Email: idStr + "@example.org", Name: "Sender " + idStr}},
 			Subject:    "Message " + idStr,
-			ReceivedAt: start.Add(time.Duration(i) * step),
+			ReceivedAt: start.Add(time.Duration(id-first) * step),
 			Size:       uint64(len(blobID)),
 		}
 		emails = append(emails, email)
@@ -266,6 +285,22 @@ func (s *testSession) Query(ctx context.Context, cfg jmap.QueryConfig, ch chan<-
 			(!cfg.Before.IsZero() && !email.ReceivedAt.Before(cfg.Before)) ||
 			(cfg.MailboxName != "" && !setContains(s.mailboxes[cfg.MailboxName], email.ID)) {
 			continue
+		}
+		if len(cfg.NotOnlyMailboxNames) > 0 {
+			notOnlyNames := make(map[string]struct{}, len(cfg.NotOnlyMailboxNames))
+			for _, name := range cfg.NotOnlyMailboxNames {
+				notOnlyNames[name] = struct{}{}
+			}
+			var inOther bool
+			for name, mb := range s.mailboxes {
+				if setContains(mb, email.ID) && !setContains(notOnlyNames, name) {
+					inOther = true
+					break
+				}
+			}
+			if !inOther {
+				continue
+			}
 		}
 		emails = append(emails, email)
 	}

@@ -30,26 +30,28 @@ const (
 
 // syncConfig configures sync's behavior.
 type syncConfig struct {
-	dbPath        string    // path to stateDB SQLite file
-	maildir       string    // path to destination Maildir directory
-	minTime       time.Time // min receivedAt time (inclusive)
-	maxTime       time.Time // max receivedAt time (exclusive)
-	mailboxName   string    // mailbox to sync; empty for all
-	startTime     time.Time // time when sync started
-	list          bool      // list messages instead of downloading them
-	stdout        io.Writer // write progress here instead of stdout if non-nil
-	queryChanSize int       // size for query result channel, 0 for default
+	dbPath              string    // path to stateDB SQLite file
+	maildir             string    // path to destination Maildir directory
+	minTime             time.Time // min receivedAt time (inclusive)
+	maxTime             time.Time // max receivedAt time (exclusive)
+	mailboxName         string    // mailbox to sync; empty for all
+	notOnlyMailboxNames []string  // skip messages only in these mailboxes
+	startTime           time.Time // time when sync started
+	list                bool      // list messages instead of downloading them
+	stdout              io.Writer // write progress here instead of stdout if non-nil
+	queryChanSize       int       // size for query result channel, 0 for default
 }
 
 // sync uses session to sync messages per cfg.
 func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	var totalEmails uint64
 	qcfg := jmap.QueryConfig{
-		After:          cfg.minTime,
-		Before:         cfg.maxTime,
-		MailboxName:    cfg.mailboxName,
-		TotalEmailsOut: &totalEmails,
-		GetDetails:     cfg.list,
+		After:               cfg.minTime,
+		Before:              cfg.maxTime,
+		MailboxName:         cfg.mailboxName,
+		NotOnlyMailboxNames: cfg.notOnlyMailboxNames,
+		TotalEmailsOut:      &totalEmails,
+		GetDetails:          cfg.list,
 	}
 	oldIDs := make(map[string]struct{})
 	var mdir *maildir.Maildir
