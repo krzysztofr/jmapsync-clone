@@ -68,3 +68,9 @@ jmapsync \
   -not-only-mailbox Spam \
   -not-only-mailbox Trash
 ```
+
+## Other notes
+
+The original idea (and the realization of what an easy-to-use protocol JMAP is)
+came from seeing the Python code in Nathan Grigg’s [Fastmail JMAP
+backup](https://nathangrigg.com/2021/08/fastmail-backup/) blog post.
