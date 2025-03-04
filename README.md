@@ -10,6 +10,11 @@ directory.
 [Fastmail]: https://www.fastmail.com/
 [Maildir]: https://en.wikipedia.org/wiki/Maildir
 
+I wrote
+[more details about how I use jmapsync](https://www.erat.org/fastmail.html#download-messages)
+as part of a long post about
+[moving from Gmail to Fastmail](https://www.erat.org/fastmail.html).
+
 ## Installation
 
 [Install Go] and run `go install` from the top of this repository to compile and
@@ -59,14 +64,15 @@ machine api.fastmail.com login jmap password <api-token>
 `jmapsync` just looks for a `machine` entry matching the hostname from
 `-session-url`; the `login` value is not currently used.
 
-A command to sync all new non-spam/trashed messages from Fastmail might look
-like the following:
+A command to sync all new non-spam/trashed/draft messages from Fastmail might
+look like the following:
 
 ```
 jmapsync \
   -maildir /path/to/maildir \
   -not-only-mailbox Spam \
-  -not-only-mailbox Trash
+  -not-only-mailbox Trash \
+  -not-only-mailbox Drafts
 ```
 
 ## Other notes
