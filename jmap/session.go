@@ -267,6 +267,33 @@ func (s *Session) getMailboxID(ctx context.Context, name string) (string, error)
 	return ids[0], nil
 }
 
+// GetMailboxNames returns the names of all mailboxes.
+func (s *Session) GetMailboxNames(ctx context.Context) ([]string, error) {
+	res, err := s.sendJMAPRequest(ctx, invocation{
+		Name: "Mailbox/get",
+		Args: map[string]any{
+			"accountId":  s.accountID,
+			"properties": []string{"name"},
+		},
+		ID: "1",
+	})
+	if err != nil {
+		return nil, err
+	}
+	var mailboxes []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := unmarshalAny(res.MethodResponses[0].Args["list"], &mailboxes); err != nil {
+		return nil, err
+	}
+	names := make([]string, len(mailboxes))
+	for i, mbox := range mailboxes {
+		names[i] = mbox.Name
+	}
+	return names, nil
+}
+
 // unmarshalAny is a dumb helper function that marshals src to JSON and then unmarshals the
 // resulting bytes into dst. There has to be a better way of doing this, but I think that the
 // core problem is that I want invocation.Args to be a map[string]any when request is using it

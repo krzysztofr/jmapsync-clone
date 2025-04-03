@@ -31,6 +31,7 @@ func main() {
 	flag.StringVar(&cfg.mailboxName, "mailbox", "", "Name of mailbox to sync (empty to sync all messages)")
 	flag.Var((*repeatedFlag)(&cfg.notOnlyMailboxNames), "not-only-mailbox", "Don't sync messages only in these mailboxes (can be repeated)")
 	flag.BoolVar(&cfg.list, "list", false, "List all matching messages instead of syncing them")
+	listMailboxes := flag.Bool("list-mailboxes", false, "Print names of all mailboxes and exit")
 	flag.Var((*timeValue)(&cfg.minTime), "min-time", "Minimum received-at RFC 3339 time (inclusive, empty to get all since last sync)")
 	flag.Var((*timeValue)(&cfg.maxTime), "max-time", "Maximum received-at RFC 3339 time (exclusive, empty for no limit)")
 	logPath := flag.String("log-file", "", "Path to file where verbose logs will be written")
@@ -45,8 +46,8 @@ func main() {
 			return 2
 		}
 
-		if (cfg.maildir != "") == cfg.list {
-			fmt.Fprint(os.Stderr, "Either -maildir or -list must be specified.\n\n")
+		if countTrue(cfg.maildir != "", cfg.list, *listMailboxes) != 1 {
+			fmt.Fprint(os.Stderr, "Exactly one of -list, -list-mailboxes, and -maildir must be specified.\n\n")
 			flag.Usage()
 			return 2
 		}
@@ -88,6 +89,19 @@ func main() {
 			return 1
 		}
 
+		// List mailboxes if requested.
+		if *listMailboxes {
+			names, err := session.GetMailboxNames(ctx)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Failed getting mailbox names:", err)
+				return 1
+			}
+			for _, n := range names {
+				fmt.Println(n)
+			}
+			return 0
+		}
+
 		// Sync messages.
 		cfg.startTime = time.Now()
 		if cerr := sync(ctx, cfg, session); cerr != nil {
@@ -99,4 +113,14 @@ func main() {
 		return 0
 	}()
 	os.Exit(rv)
+}
+
+func countTrue(vals ...bool) int {
+	var cnt int
+	for _, v := range vals {
+		if v {
+			cnt++
+		}
+	}
+	return cnt
 }

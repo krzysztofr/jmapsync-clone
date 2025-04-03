@@ -35,6 +35,8 @@ Incrementally download email messages from a JMAP server.
     	SQLite database for storing last sync state (default "$HOME/.jmapsync.db")
   -list
     	List all matching messages instead of syncing them
+  -list-mailboxes
+    	Print names of all mailboxes and exit
   -log-file string
     	Path to file where verbose logs will be written
   -mailbox string
