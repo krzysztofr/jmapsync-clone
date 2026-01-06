@@ -1,3 +1,18 @@
+Note: This is my clone of jmapsync with modifications that I needed to run the script on my Windows 11, due to the following error:
+```
+cannot load SQLite driver: failed to open database: binary was compiled with 'CGO_ENABLED=0
+```
+
+In order to compile the program, you need to run first:
+```
+go get modernc.org/sqlite@latest
+```
+
+I took advice from [TutorialPedia.org article](https://www.tutorialpedia.org/blog/binary-was-compiled-with-cgo-enabled-0-go-sqlite3-requires-cgo-to-work-this-is-a-stub/#alternative-use-a-pure-go-sqlite-driver).
+
+ I'm not expert in Go, so use it at your own risk. 
+ -KR
+
 # jmapsync
 
 [![Build Status](https://storage.googleapis.com/derat-build-badges/8a908f0e-93f0-4cab-abf3-2497cd54768b.svg)](https://storage.googleapis.com/derat-build-badges/8a908f0e-93f0-4cab-abf3-2497cd54768b.html)

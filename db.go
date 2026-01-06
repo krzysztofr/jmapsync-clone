@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // stateDB holds state about the previous sync.
@@ -17,7 +17,7 @@ type stateDB struct{ db *sql.DB }
 
 // newStateDB creates a new SQLite database at path.
 func newStateDB(path string) (*stateDB, error) {
-	db, err := sql.Open("sqlite3", path+"?_locking=EXCLUSIVE")
+	db, err := sql.Open("sqlite", path+"?_locking=EXCLUSIVE")
 	if err != nil {
 		return nil, err
 	}
