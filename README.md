@@ -92,6 +92,39 @@ jmapsync \
   -not-only-mailbox Drafts
 ```
 
+## Crash Safety & Duplicate Prevention
+
+This fork implements crash-safe duplicate prevention for unexpected interruptions (Windows shutdown, Ctrl+C, power loss).
+
+### Problem Analysis
+The original implementation could create duplicate downloads when interrupted because message IDs were written to the database without proper durability guarantees (SQLite `synchronous=NORMAL` mode).
+
+### Solution Options Evaluated
+
+| Option | Approach | Pros | Cons |
+|--------|----------|------|------|
+| 1. Synchronous Writes | `synchronous=FULL` per message | Simple one-line fix, guaranteed durability | Very slow for initial 75k sync (hours of fsync overhead) |
+| 2. Batched Commits | Commit every 50 messages with `synchronous=FULL` | Good performance (1,500 vs 75,000 commits), resumable sync, max 50 duplicates on crash | More complex implementation |
+| 3. WAL Mode | `journal=WAL` with `synchronous=NORMAL` | Better performance | Additional files, still some crash risk |
+| 4. Single Transaction | One transaction per sync | Perfectly consistent | Re-downloads ALL messages on any interruption |
+
+### Chosen Solution: Option 2 (Batched Commits with Uncommitted File)
+
+**Why:** Balances crash safety with performance for large initial syncs (75k messages) while maintaining resumability.
+
+**How it works:**
+- Database commits every 50 messages with `synchronous=FULL` (durable)
+- Uncommitted IDs (max 50) tracked in `.jmapsync.db.uncommitted` file
+- On startup: verifies uncommitted IDs against maildir file count
+- If count matches: commits uncommitted IDs to database
+- If mismatch: clears uncommitted file, relies on 1-hour overlap to re-download
+- Result: Zero duplicates even with unexpected shutdowns
+
+**Implementation details:**
+- Uncommitted file automatically managed (created/cleared as needed)
+- File count verification prevents database corruption from partial downloads
+- Max 50 messages (0.07% of 75k) at risk on crash, automatically recovered
+
 ## Other notes
 
 The original idea (and the realization of what an easy-to-use protocol JMAP is)

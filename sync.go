@@ -5,11 +5,13 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"codeberg.org/derat/jmapsync/jmap"
@@ -26,6 +28,8 @@ const (
 	defaultQueryChanSize = 100
 	// emailAddressWidth is the default width for email addresses which listing messages.
 	emailAddressWidth = 20
+	// defaultBatchSize is the number of messages to commit in each database transaction.
+	defaultBatchSize = 50
 )
 
 // syncConfig configures sync's behavior.
@@ -40,6 +44,7 @@ type syncConfig struct {
 	list                bool      // list messages instead of downloading them
 	stdout              io.Writer // write progress here instead of stdout if non-nil
 	queryChanSize       int       // size for query result channel, 0 for default
+	batchSize           int       // batch commit size, 0 for default
 }
 
 // sync uses session to sync messages per cfg.
@@ -56,6 +61,7 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	oldIDs := make(map[string]struct{})
 	var mdir *maildir.Maildir
 	var db *stateDB
+	var txPtr **sql.Tx // Track active transaction for cleanup on error.
 
 	vlog.Log(ctx, "Starting sync at ", formatTime(cfg.startTime))
 
@@ -78,6 +84,60 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 				db.close()
 			}
 		}()
+
+		// Defer transaction rollback on error.
+		defer func() {
+			if txPtr != nil && *txPtr != nil {
+				(*txPtr).Rollback() // Rollback any uncommitted transaction on error.
+			}
+		}()
+
+		// Recover any uncommitted IDs from a previous interrupted sync.
+		uncommittedPath := getUncommittedFilePath(cfg.dbPath)
+		uncommittedIDs, err := loadUncommittedIDs(uncommittedPath)
+		if err != nil {
+			return cmdErrorf(1, "Failed loading uncommitted IDs: %v", err)
+		}
+		if len(uncommittedIDs) > 0 {
+			vlog.Logf(ctx, "Found %d uncommitted IDs from previous interrupted sync", len(uncommittedIDs))
+
+			// Verify maildir file count matches expectations.
+			maildirCount, err := countMaildirFiles(cfg.maildir)
+			if err != nil {
+				return cmdErrorf(1, "Failed counting maildir files: %v", err)
+			}
+			dbIDs, err := db.getLastSyncIDs()
+			if err != nil {
+				return cmdErrorf(1, "Failed getting database IDs for verification: %v", err)
+			}
+			expected := len(dbIDs) + len(uncommittedIDs)
+
+			if maildirCount == expected {
+				// Count matches - safe to commit uncommitted IDs using a transaction.
+				vlog.Logf(ctx, "Maildir count matches (%d files), committing %d uncommitted IDs", maildirCount, len(uncommittedIDs))
+				recoveryTx, err := db.beginBatch()
+				if err != nil {
+					return cmdErrorf(1, "Failed starting recovery transaction: %v", err)
+				}
+				for _, id := range uncommittedIDs {
+					if err := db.addLastSyncIDBatch(recoveryTx, id); err != nil {
+						return cmdErrorf(1, "Failed adding recovered ID to transaction: %v", err)
+					}
+				}
+				if err := db.commitBatch(recoveryTx); err != nil {
+					return cmdErrorf(1, "Failed committing recovered IDs: %v", err)
+				}
+				if err := clearUncommittedFile(uncommittedPath); err != nil {
+					vlog.Logf(ctx, "Warning: failed to clear uncommitted file: %v", err)
+				}
+			} else {
+				// Count mismatch - don't commit, rely on overlap to re-download.
+				vlog.Logf(ctx, "ERROR: Maildir has %d files but expected %d. NOT committing uncommitted IDs. Missing/extra messages will be handled by overlap.", maildirCount, expected)
+				if err := clearUncommittedFile(uncommittedPath); err != nil {
+					vlog.Logf(ctx, "Warning: failed to clear uncommitted file: %v", err)
+				}
+			}
+		}
 
 		// Sync messages received since slightly before the last sync if the user didn't specify a
 		// minimum time.
@@ -118,6 +178,24 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 		}
 		close(errChan)
 	}()
+
+	// Initialize batching variables for database commits.
+	batchSize := cfg.batchSize
+	if batchSize == 0 {
+		batchSize = defaultBatchSize
+	}
+	var tx *sql.Tx
+	var batchCount int
+	var uncommittedPath string
+	if !cfg.list {
+		uncommittedPath = getUncommittedFilePath(cfg.dbPath)
+		var err error
+		tx, err = db.beginBatch()
+		if err != nil {
+			return cmdErrorf(1, "Failed starting initial batch transaction: %v", err)
+		}
+		txPtr = &tx // Enable transaction rollback on error.
+	}
 
 	// Download messages as we receive IDs.
 	var emailIdx int
@@ -172,9 +250,38 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 			emailIdx, totalEmails, email.ID, filepath.Base(p), email.Size)
 		vlog.Logf(ctx, "Delivered %v to %v", email.ID, p)
 
-		// Record the ID so we don't download it again next time.
-		if err := db.addLastSyncID(email.ID); err != nil {
-			return cmdErrorf(1, "Failed recording synced ID: %v", err)
+		// Record the ID using batched commits for crash safety.
+		// FIRST: Append to uncommitted file (durable write).
+		if err := appendToUncommittedFile(uncommittedPath, email.ID); err != nil {
+			return cmdErrorf(1, "Failed writing uncommitted ID: %v", err)
+		}
+
+		// SECOND: Add to batch transaction (not yet durable).
+		if err := db.addLastSyncIDBatch(tx, email.ID); err != nil {
+			return cmdErrorf(1, "Failed recording synced ID in batch: %v", err)
+		}
+
+		batchCount++
+
+		// THIRD: Commit batch every batchSize messages.
+		if batchCount >= batchSize {
+			if err := db.commitBatch(tx); err != nil {
+				return cmdErrorf(1, "Failed committing batch: %v", err)
+			}
+			vlog.Logf(ctx, "Committed batch of %d messages", batchCount)
+			tx = nil // Transaction committed, clear it.
+
+			// Batch committed - clear uncommitted file.
+			if err := clearUncommittedFile(uncommittedPath); err != nil {
+				vlog.Logf(ctx, "Warning: failed to clear uncommitted file: %v", err)
+			}
+
+			// Start new batch.
+			tx, err = db.beginBatch()
+			if err != nil {
+				return cmdErrorf(1, "Failed starting new batch transaction: %v", err)
+			}
+			batchCount = 0
 		}
 	}
 	if err := <-errChan; err != nil {
@@ -182,6 +289,19 @@ func sync(ctx context.Context, cfg syncConfig, session session) *cmdError {
 	}
 
 	if !cfg.list {
+		// Commit any remaining uncommitted messages in the final batch.
+		if tx != nil && batchCount > 0 {
+			if err := db.commitBatch(tx); err != nil {
+				return cmdErrorf(1, "Failed committing final batch: %v", err)
+			}
+			vlog.Logf(ctx, "Committed final batch of %d messages", batchCount)
+			tx = nil // Transaction committed, clear it.
+			if err := clearUncommittedFile(uncommittedPath); err != nil {
+				vlog.Logf(ctx, "Warning: failed to clear uncommitted file: %v", err)
+			}
+			batchCount = 0
+		}
+
 		// Only update last-sync-related state if a max time wasn't set.
 		if cfg.maxTime.IsZero() {
 			vlog.Log(ctx, "Setting last sync time to ", formatTime(cfg.startTime))
@@ -255,4 +375,69 @@ func truncate(orig string, max int, elide bool) string {
 // formatTime formats t as an RFC 3339 local time.
 func formatTime(t time.Time) string {
 	return t.Local().Format(time.RFC3339)
+}
+
+// getUncommittedFilePath returns the path to the uncommitted IDs file.
+func getUncommittedFilePath(dbPath string) string {
+	return dbPath + ".uncommitted"
+}
+
+// appendToUncommittedFile appends a single ID to the uncommitted file.
+func appendToUncommittedFile(path, id string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintln(f, id)
+	return err
+}
+
+// loadUncommittedIDs reads all IDs from the uncommitted file.
+func loadUncommittedIDs(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	ids := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			ids = append(ids, line)
+		}
+	}
+	return ids, nil
+}
+
+// clearUncommittedFile truncates the uncommitted file to 0 bytes.
+func clearUncommittedFile(path string) error {
+	return os.Truncate(path, 0)
+}
+
+// countMaildirFiles counts the total number of regular files in the maildir new/ and cur/ subdirectories.
+func countMaildirFiles(maildirPath string) (int, error) {
+	count := 0
+	for _, subdir := range []string{"new", "cur"} {
+		dir := filepath.Join(maildirPath, subdir)
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		for _, entry := range entries {
+			if entry.Type().IsRegular() {
+				count++
+			}
+		}
+	}
+	return count, nil
 }

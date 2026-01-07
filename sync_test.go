@@ -381,3 +381,74 @@ func stringifySet(s map[string]struct{}) string {
 	sort.Strings(keys)
 	return strings.Join(keys, " ")
 }
+
+func TestSync_CrashRecovery(t *testing.T) {
+	cfg, _ := makeTestConfig(t)
+	cfg.batchSize = 5 // Use small batch size for testing
+	session := newTestSession()
+
+	// Add 12 messages
+	emails := session.addEmails(1, 12, date("2024-11-02 14:00:00"), time.Minute)
+
+	// Simulate crash after 7th message (batch of 5 committed, 2 uncommitted)
+	session.errAfter = 7
+	doTestSync(t, cfg, session, date("2024-11-02 15:00:00"), false)
+
+	// Verify: 7 messages in maildir
+	verifyMaildir(t, cfg.maildir, emails[:7])
+
+	// Verify: 5 in DB, 2 in uncommitted file
+	db, err := newStateDB(cfg.dbPath)
+	if err != nil {
+		t.Fatal("Failed opening DB:", err)
+	}
+	dbIDs, err := db.getLastSyncIDs()
+	if err != nil {
+		t.Fatal("Failed getting DB IDs:", err)
+	}
+	db.close()
+	if len(dbIDs) != 5 {
+		t.Fatalf("Database has %d IDs after crash, want 5", len(dbIDs))
+	}
+
+	uncommittedPath := getUncommittedFilePath(cfg.dbPath)
+	uncommittedIDs, err := loadUncommittedIDs(uncommittedPath)
+	if err != nil {
+		t.Fatal("Failed loading uncommitted IDs:", err)
+	}
+	if len(uncommittedIDs) != 2 {
+		t.Fatalf("Uncommitted file has %d IDs after crash, want 2", len(uncommittedIDs))
+	}
+
+	// Resume sync - should recover uncommitted IDs and continue
+	session.errAfter = 0
+	doTestSync(t, cfg, session, date("2024-11-02 15:05:00"), true)
+
+	// Verify: all 12 messages in maildir, all 12 in DB, uncommitted file empty
+	verifyMaildir(t, cfg.maildir, emails)
+
+	db, err = newStateDB(cfg.dbPath)
+	if err != nil {
+		t.Fatal("Failed opening DB after recovery:", err)
+	}
+	dbIDs, err = db.getLastSyncIDs()
+	if err != nil {
+		t.Fatal("Failed getting DB IDs after recovery:", err)
+	}
+	db.close()
+	if len(dbIDs) != 12 {
+		t.Fatalf("Database has %d IDs after recovery, want 12", len(dbIDs))
+	}
+
+	uncommittedIDs, err = loadUncommittedIDs(uncommittedPath)
+	if err != nil {
+		t.Fatal("Failed loading uncommitted IDs after recovery:", err)
+	}
+	if len(uncommittedIDs) != 0 {
+		t.Fatalf("Uncommitted file has %d IDs after recovery, want 0", len(uncommittedIDs))
+	}
+
+	// Sync again - should be no-op, no duplicates
+	doTestSync(t, cfg, session, date("2024-11-02 15:10:00"), true)
+	verifyMaildir(t, cfg.maildir, emails) // Still no duplicates
+}

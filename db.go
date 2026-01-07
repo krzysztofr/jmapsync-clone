@@ -17,7 +17,7 @@ type stateDB struct{ db *sql.DB }
 
 // newStateDB creates a new SQLite database at path.
 func newStateDB(path string) (*stateDB, error) {
-	db, err := sql.Open("sqlite", path+"?_locking=EXCLUSIVE")
+	db, err := sql.Open("sqlite", path+"?_locking=EXCLUSIVE&_synchronous=FULL")
 	if err != nil {
 		return nil, err
 	}
@@ -125,4 +125,20 @@ func (sdb *stateDB) removeLastSyncIDs(ids []string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// beginBatch starts a transaction for batch operations.
+func (sdb *stateDB) beginBatch() (*sql.Tx, error) {
+	return sdb.db.Begin()
+}
+
+// commitBatch commits a batch transaction.
+func (sdb *stateDB) commitBatch(tx *sql.Tx) error {
+	return tx.Commit()
+}
+
+// addLastSyncIDBatch adds an ID within a transaction (for batched operations).
+func (sdb *stateDB) addLastSyncIDBatch(tx *sql.Tx, id string) error {
+	_, err := tx.Exec("REPLACE INTO LastSyncIDs VALUES(?)", id)
+	return err
 }
