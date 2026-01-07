@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/derat/jmapsync/jmap"
+	"github.com/krzysztofr/jmapsync/jmap"
 )
 
 func TestSync_Basic(t *testing.T) {

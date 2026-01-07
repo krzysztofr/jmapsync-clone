@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/derat/jmapsync/vlog"
+	"github.com/krzysztofr/jmapsync/vlog"
 )
 
 const (

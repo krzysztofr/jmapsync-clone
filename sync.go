@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/derat/jmapsync/jmap"
-	"codeberg.org/derat/jmapsync/maildir"
-	"codeberg.org/derat/jmapsync/vlog"
+	"github.com/krzysztofr/jmapsync/jmap"
+	"github.com/krzysztofr/jmapsync/maildir"
+	"github.com/krzysztofr/jmapsync/vlog"
 )
 
 const (

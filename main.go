@@ -13,9 +13,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"codeberg.org/derat/jmapsync/jmap"
-	"codeberg.org/derat/jmapsync/netrc"
-	"codeberg.org/derat/jmapsync/vlog"
+	"github.com/krzysztofr/jmapsync/jmap"
+	"github.com/krzysztofr/jmapsync/netrc"
+	"github.com/krzysztofr/jmapsync/vlog"
 )
 
 func main() {
