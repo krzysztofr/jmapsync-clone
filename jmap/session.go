@@ -376,8 +376,7 @@ func (s *Session) sendJMAPRequest(ctx context.Context, methodCalls ...invocation
 		}
 		if mr := jres.MethodResponses[i]; mr.Name == "error" {
 			// Get the "type" field for more details per RFC 8620 3.6.2.
-			errType, _ := mr.Args["type"]
-			return &jres, fmt.Errorf("method call %v failed: %v", mr.ID, errType)
+			return &jres, fmt.Errorf("method call %v failed: %v", mr.ID, mr.Args["type"])
 		}
 	}
 	return &jres, nil
